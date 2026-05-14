@@ -78,10 +78,11 @@ def start_render_health_server() -> None:
 STARTING_BALANCE = 250
 COMMAND_PREFIX = "."
 DEVELOPER_ROLE_NAME = "developer"
-COINFLIP_WIN_RATE = 0.45
-BLACKJACK_WIN_RETURN = 1.95
+COINFLIP_WIN_RATE = 0.40
+BLACKJACK_WIN_RETURN = 1.85
+DICE_HOUSE_RETURN = 0.94
 MINES_GRID_SIZE = 25
-MINES_HOUSE_EDGE = 0.99
+MINES_HOUSE_EDGE = 0.94
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_BALANCES_TABLE = os.getenv("SUPABASE_BALANCES_TABLE", "player_balances")
@@ -110,6 +111,7 @@ CARD_ALIASES = {
 }
 
 balances: dict[int, float] = {}
+processed_command_messages: set[int] = set()
 active_blackjack_games: dict[int, "BlackjackGame"] = {}
 active_blackjack_views: dict[int, "BlackjackView"] = {}
 active_mines_games: dict[int, "MinesGame"] = {}
@@ -194,6 +196,59 @@ def save_balance_to_supabase(user_id: int, amount: float) -> None:
         )
     except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
         print(f"Could not save balance for {user_id} to Supabase: {error}")
+
+
+def leaderboard_balances(limit: int = 10) -> list[tuple[int, float]]:
+    if supabase_enabled():
+        try:
+            rows = supabase_request(
+                "GET",
+                SUPABASE_BALANCES_TABLE,
+                query={
+                    "select": "user_id,balance",
+                    "order": "balance.desc",
+                    "limit": str(limit),
+                },
+            )
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+            print(f"Could not fetch leaderboard from Supabase: {error}")
+        else:
+            if isinstance(rows, list):
+                leaderboard = []
+                for row in rows:
+                    try:
+                        leaderboard.append((int(row["user_id"]), round(float(row["balance"]), 2)))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                return leaderboard
+
+    return sorted(balances.items(), key=lambda item: item[1], reverse=True)[:limit]
+
+
+def claim_command_message(message_id: int) -> bool:
+    if not supabase_enabled():
+        if message_id in processed_command_messages:
+            return False
+        processed_command_messages.add(message_id)
+        return True
+
+    try:
+        supabase_request(
+            "POST",
+            "processed_command_messages",
+            payload={"message_id": str(message_id)},
+            prefer="return=minimal",
+        )
+    except HTTPError as error:
+        if error.code == 409:
+            return False
+        print(f"Could not claim command message {message_id} in Supabase: {error}")
+        return True
+    except (URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not claim command message {message_id} in Supabase: {error}")
+        return True
+
+    return True
 
 
 def balance_for(user_id: int) -> float:
@@ -891,6 +946,18 @@ async def on_ready() -> None:
     print(f"Balance storage: {'Supabase' if supabase_enabled() else 'memory'}")
 
 
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot or not message.content.startswith(COMMAND_PREFIX):
+        return
+
+    if not claim_command_message(message.id):
+        print(f"Skipped duplicate command message {message.id}")
+        return
+
+    await bot.process_commands(message)
+
+
 @bot.command(name="help")
 async def casino_help(ctx: commands.Context) -> None:
     embed = make_embed(
@@ -898,9 +965,11 @@ async def casino_help(ctx: commands.Context) -> None:
         "\n".join(
             [
                 ".bal - check your balance",
+                ".bal @user - developer role only; check another user's balance",
+                ".leaderboard - show top balances",
                 ".bj [bet] - start blackjack with buttons",
                 ".cf [bet] [heads/tails] - play coinflip",
-                ".dice [bet] [under/over] [target] - play dice with a 1% house edge",
+                ".dice [bet] [under/over] [target] - play dice",
                 ".mines [bet] [mines] - play a 25-square mines game",
                 ".redeem [code] - redeem a promo code",
                 ".addbal @user [amount] - developer role only",
@@ -914,9 +983,32 @@ async def casino_help(ctx: commands.Context) -> None:
 
 
 @bot.command(name="bal")
-async def balance_command(ctx: commands.Context) -> None:
-    balance = balance_for(ctx.author.id)
-    await ctx.send(embed=make_embed("Balance", f"Your balance is ${money(balance)}."))
+async def balance_command(ctx: commands.Context, target: discord.Member = None) -> None:
+    if target is not None and not await require_developer_role(ctx):
+        return
+
+    member = target or ctx.author
+    balance = balance_for(member.id)
+    if target is None:
+        description = f"Your balance is ${money(balance)}."
+    else:
+        description = f"{member.mention}'s balance is ${money(balance)}."
+
+    await ctx.send(embed=make_embed("Balance", description))
+
+
+@bot.command(name="leaderboard", aliases=["lb"])
+async def leaderboard_command(ctx: commands.Context) -> None:
+    leaderboard = leaderboard_balances()
+    if not leaderboard:
+        await ctx.send(embed=make_embed("Leaderboard", "No balances yet."))
+        return
+
+    lines = [
+        f"{rank}. <@{user_id}> - ${money(balance)}"
+        for rank, (user_id, balance) in enumerate(leaderboard, start=1)
+    ]
+    await ctx.send(embed=make_embed("Leaderboard", "\n".join(lines), discord.Color.gold()))
 
 
 @bot.command(name="addbal")
@@ -1097,7 +1189,7 @@ async def dice_command(ctx: commands.Context, requested_bet: int, direction: str
         await ctx.send(warning)
         return
 
-    multiplier = 99 / win_chance
+    multiplier = 100 * DICE_HOUSE_RETURN / win_chance
     roll = random.randint(0, 9999) / 100
     won = roll < target if direction == "under" else roll > target
 
@@ -1218,6 +1310,9 @@ async def blackjack_command(ctx: commands.Context, requested_bet: int) -> None:
 
 def command_usage(command_name: str | None) -> str | None:
     usages = {
+        "bal": ".bal [@user]",
+        "leaderboard": ".leaderboard",
+        "lb": ".leaderboard",
         "addbal": ".addbal @user amount",
         "removebal": ".removebal @user amount",
         "promo": ".promo code amount [people_limit]",
