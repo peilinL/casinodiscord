@@ -42,11 +42,25 @@ def start_render_health_server() -> None:
         return
 
     class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
+        def health_payload(self) -> tuple[bytes, str]:
+            if self.path.split("?", 1)[0] == "/health":
+                return b'{"status":"ok"}\n', "application/json"
+            return b"Casino bot is running.\n", "text/plain"
+
+        def send_health_response(self, body: bytes, content_type: str) -> None:
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"Casino bot is running.\n")
+
+        def do_GET(self) -> None:
+            body, content_type = self.health_payload()
+            self.send_health_response(body, content_type)
+            self.wfile.write(body)
+
+        def do_HEAD(self) -> None:
+            body, content_type = self.health_payload()
+            self.send_health_response(body, content_type)
 
         def log_message(self, format: str, *args: object) -> None:
             return
