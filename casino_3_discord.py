@@ -88,6 +88,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
 SUPABASE_BALANCES_TABLE = os.getenv("SUPABASE_BALANCES_TABLE", "player_balances")
+SUPABASE_COMMAND_MESSAGES_TABLE = os.getenv("SUPABASE_COMMAND_MESSAGES_TABLE", "processed_command_messages")
 
 CARD_VALUES = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10]
 CARD_LABELS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
@@ -144,6 +145,12 @@ def supabase_enabled() -> bool:
     return bool(SUPABASE_URL and SUPABASE_KEY)
 
 
+def supabase_table_path(table_name: str) -> str:
+    if "." in table_name:
+        return table_name
+    return f"public.{table_name}"
+
+
 def log_storage_status() -> None:
     storage = "Supabase" if supabase_enabled() else "memory"
     print(f"Balance storage: {storage}", flush=True)
@@ -194,7 +201,7 @@ def fetch_balance_from_supabase(user_id: int) -> float | None:
     try:
         rows = supabase_request(
             "GET",
-            SUPABASE_BALANCES_TABLE,
+            supabase_table_path(SUPABASE_BALANCES_TABLE),
             query={
                 "select": "balance",
                 "user_id": f"eq.{user_id}",
@@ -219,7 +226,7 @@ def save_balance_to_supabase(user_id: int, amount: float) -> None:
     try:
         supabase_request(
             "POST",
-            SUPABASE_BALANCES_TABLE,
+            supabase_table_path(SUPABASE_BALANCES_TABLE),
             payload={
                 "user_id": str(user_id),
                 "balance": round(amount, 2),
@@ -237,7 +244,7 @@ def leaderboard_balances(limit: int = 10) -> list[tuple[int, float]]:
         try:
             rows = supabase_request(
                 "GET",
-                SUPABASE_BALANCES_TABLE,
+                supabase_table_path(SUPABASE_BALANCES_TABLE),
                 query={
                     "select": "user_id,balance",
                     "order": "balance.desc",
@@ -272,7 +279,7 @@ def claim_command_message(message_id: int) -> bool:
     try:
         supabase_request(
             "POST",
-            "processed_command_messages",
+            supabase_table_path(SUPABASE_COMMAND_MESSAGES_TABLE),
             payload={"message_id": str(message_id)},
             prefer="return=minimal",
         )
@@ -1099,13 +1106,14 @@ async def dbstatus_command(ctx: commands.Context) -> None:
         f"SUPABASE_SERVICE_ROLE_KEY set: {'yes' if SUPABASE_SERVICE_ROLE_KEY else 'no'}",
         f"SUPABASE_ANON_KEY fallback set: {'yes' if SUPABASE_ANON_KEY else 'no'}",
         f"Balances table: `{SUPABASE_BALANCES_TABLE}`",
+        f"Command guard table: `{SUPABASE_COMMAND_MESSAGES_TABLE}`",
     ]
 
     if supabase_enabled():
         try:
             rows = supabase_request(
                 "GET",
-                SUPABASE_BALANCES_TABLE,
+                supabase_table_path(SUPABASE_BALANCES_TABLE),
                 query={"select": "user_id,balance", "limit": "1"},
             )
         except HTTPError as error:
@@ -1119,7 +1127,7 @@ async def dbstatus_command(ctx: commands.Context) -> None:
         try:
             guard_rows = supabase_request(
                 "GET",
-                "processed_command_messages",
+                supabase_table_path(SUPABASE_COMMAND_MESSAGES_TABLE),
                 query={"select": "message_id", "limit": "1"},
             )
         except HTTPError as error:

@@ -9,3 +9,9 @@ services:
     envVars:
       - key: DISCORD_TOKEN
         sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_COMMAND_MESSAGES_TABLE
+        value: processed_command_messages
