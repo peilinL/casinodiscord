@@ -145,10 +145,18 @@ def supabase_enabled() -> bool:
     return bool(SUPABASE_URL and SUPABASE_KEY)
 
 
-def supabase_table_path(table_name: str) -> str:
-    if "." in table_name:
-        return table_name
-    return f"public.{table_name}"
+def http_error_summary(error: HTTPError) -> str:
+    try:
+        body = error.read().decode("utf-8").strip()
+    except Exception:
+        body = ""
+
+    if len(body) > 180:
+        body = f"{body[:177]}..."
+
+    if body:
+        return f"HTTP {error.code}: {body}"
+    return f"HTTP {error.code}"
 
 
 def log_storage_status() -> None:
@@ -177,6 +185,8 @@ def supabase_request(
     headers = {
         "apikey": SUPABASE_KEY or "",
         "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept-Profile": "public",
+        "Content-Profile": "public",
     }
 
     if payload is not None:
@@ -201,7 +211,7 @@ def fetch_balance_from_supabase(user_id: int) -> float | None:
     try:
         rows = supabase_request(
             "GET",
-            supabase_table_path(SUPABASE_BALANCES_TABLE),
+            SUPABASE_BALANCES_TABLE,
             query={
                 "select": "balance",
                 "user_id": f"eq.{user_id}",
@@ -226,7 +236,7 @@ def save_balance_to_supabase(user_id: int, amount: float) -> None:
     try:
         supabase_request(
             "POST",
-            supabase_table_path(SUPABASE_BALANCES_TABLE),
+            SUPABASE_BALANCES_TABLE,
             payload={
                 "user_id": str(user_id),
                 "balance": round(amount, 2),
@@ -244,7 +254,7 @@ def leaderboard_balances(limit: int = 10) -> list[tuple[int, float]]:
         try:
             rows = supabase_request(
                 "GET",
-                supabase_table_path(SUPABASE_BALANCES_TABLE),
+                SUPABASE_BALANCES_TABLE,
                 query={
                     "select": "user_id,balance",
                     "order": "balance.desc",
@@ -279,7 +289,7 @@ def claim_command_message(message_id: int) -> bool:
     try:
         supabase_request(
             "POST",
-            supabase_table_path(SUPABASE_COMMAND_MESSAGES_TABLE),
+            SUPABASE_COMMAND_MESSAGES_TABLE,
             payload={"message_id": str(message_id)},
             prefer="return=minimal",
         )
@@ -1113,11 +1123,11 @@ async def dbstatus_command(ctx: commands.Context) -> None:
         try:
             rows = supabase_request(
                 "GET",
-                supabase_table_path(SUPABASE_BALANCES_TABLE),
+                SUPABASE_BALANCES_TABLE,
                 query={"select": "user_id,balance", "limit": "1"},
             )
         except HTTPError as error:
-            lines.append(f"Supabase test: failed with HTTP {error.code}")
+            lines.append(f"Supabase test: failed with {http_error_summary(error)}")
         except (URLError, TimeoutError, OSError, ValueError) as error:
             lines.append(f"Supabase test: failed ({type(error).__name__})")
         else:
@@ -1127,11 +1137,11 @@ async def dbstatus_command(ctx: commands.Context) -> None:
         try:
             guard_rows = supabase_request(
                 "GET",
-                supabase_table_path(SUPABASE_COMMAND_MESSAGES_TABLE),
+                SUPABASE_COMMAND_MESSAGES_TABLE,
                 query={"select": "message_id", "limit": "1"},
             )
         except HTTPError as error:
-            lines.append(f"Command guard table: failed with HTTP {error.code}")
+            lines.append(f"Command guard table: failed with {http_error_summary(error)}")
         except (URLError, TimeoutError, OSError, ValueError) as error:
             lines.append(f"Command guard table: failed ({type(error).__name__})")
         else:
