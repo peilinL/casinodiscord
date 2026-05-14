@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import random
 import threading
+from math import comb
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -60,6 +61,8 @@ STARTING_BALANCE = 1000
 COMMAND_PREFIX = "."
 DEVELOPER_ROLE_NAME = "developer"
 COINFLIP_WIN_RATE = 0.45
+MINES_GRID_SIZE = 25
+MINES_HOUSE_EDGE = 0.99
 
 CARD_VALUES = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10]
 CARD_LABELS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
@@ -87,6 +90,9 @@ CARD_ALIASES = {
 balances: dict[int, float] = {}
 active_blackjack_games: dict[int, "BlackjackGame"] = {}
 active_blackjack_views: dict[int, "BlackjackView"] = {}
+active_mines_games: dict[int, "MinesGame"] = {}
+active_mines_sessions: dict[int, "MinesSession"] = {}
+promo_codes: dict[str, "PromoCode"] = {}
 
 
 def money(amount: float) -> str:
@@ -101,6 +107,24 @@ def balance_for(user_id: int) -> float:
 
 def set_balance(user_id: int, amount: float) -> None:
     balances[user_id] = round(amount, 2)
+
+
+def normalize_promo_code(code: str) -> str:
+    return code.strip().upper()
+
+
+def valid_promo_code(code: str) -> bool:
+    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    return 3 <= len(code) <= 32 and all(character in allowed for character in code)
+
+
+def mines_multiplier(mine_count: int, revealed_safe: int) -> float:
+    if revealed_safe < 1:
+        return 1.0
+
+    safe_squares = MINES_GRID_SIZE - mine_count
+    fair_multiplier = comb(MINES_GRID_SIZE, revealed_safe) / comb(safe_squares, revealed_safe)
+    return round(fair_multiplier * MINES_HOUSE_EDGE, 4)
 
 
 def draw_card() -> int:
@@ -163,6 +187,14 @@ def has_active_blackjack(user_id: int) -> bool:
     return user_id in active_blackjack_games
 
 
+def active_game_name(user_id: int) -> str | None:
+    if user_id in active_blackjack_games:
+        return "blackjack"
+    if user_id in active_mines_games:
+        return "mines"
+    return None
+
+
 def has_developer_role(member: discord.abc.User) -> bool:
     return isinstance(member, discord.Member) and any(
         role.name.casefold().strip() == DEVELOPER_ROLE_NAME for role in member.roles
@@ -182,6 +214,25 @@ async def require_developer_role(ctx: commands.Context) -> bool:
 
     await ctx.send("You need the developer role to use that command.")
     return False
+
+
+@dataclass
+class PromoCode:
+    code: str
+    amount: int
+    max_people: int
+    redeemed_by: set[int] = field(default_factory=set)
+
+    @property
+    def people_left(self) -> int:
+        return max(0, self.max_people - len(self.redeemed_by))
+
+    def can_redeem(self, user_id: int) -> tuple[bool, str | None]:
+        if user_id in self.redeemed_by:
+            return False, "You already redeemed that promo code."
+        if self.people_left < 1:
+            return False, "That promo code has reached its redemption limit."
+        return True, None
 
 
 @dataclass
@@ -486,6 +537,245 @@ class BlackjackView(discord.ui.View):
         await self.update_game(interaction, self.game.split())
 
 
+@dataclass
+class MinesGame:
+    user_id: int
+    bet: int
+    mine_count: int
+    balance: float
+    mines: set[int]
+    revealed_safe: set[int] = field(default_factory=set)
+    finished: bool = False
+    result: str = ""
+
+    @classmethod
+    def start(cls, user_id: int, balance: float, bet: int, mine_count: int) -> "MinesGame":
+        mines = set(random.sample(range(MINES_GRID_SIZE), mine_count))
+        return cls(
+            user_id=user_id,
+            bet=bet,
+            mine_count=mine_count,
+            balance=round(balance - bet, 2),
+            mines=mines,
+        )
+
+    @property
+    def safe_total(self) -> int:
+        return MINES_GRID_SIZE - self.mine_count
+
+    def current_multiplier(self) -> float:
+        return mines_multiplier(self.mine_count, len(self.revealed_safe))
+
+    def current_payout(self) -> float:
+        return round(self.bet * self.current_multiplier(), 2)
+
+    def reveal(self, index: int) -> str:
+        if self.finished:
+            return "This mines game is already over."
+        if index in self.revealed_safe:
+            return "That square is already revealed."
+        if index in self.mines:
+            self.finished = True
+            self.result = f"Square {index + 1} had a mine. You lose ${money(self.bet)}."
+            return self.result
+
+        self.revealed_safe.add(index)
+        if len(self.revealed_safe) >= self.safe_total:
+            return self.cash_out(f"Square {index + 1} was safe. All safe squares revealed.")
+
+        payout = self.current_payout()
+        multiplier = self.current_multiplier()
+        return f"Square {index + 1} was safe. Current cashout: ${money(payout)} ({money(multiplier)}x)."
+
+    def cash_out(self, prefix: str | None = None) -> str:
+        if self.finished:
+            return "This mines game is already over."
+        if not self.revealed_safe:
+            return "Reveal at least one safe square before cashing out."
+
+        payout = self.current_payout()
+        multiplier = self.current_multiplier()
+        profit = round(payout - self.bet, 2)
+        self.balance = round(self.balance + payout, 2)
+        self.finished = True
+        outcome = f"Cashed out for ${money(payout)} ({money(multiplier)}x). Profit: ${money(profit)}."
+        self.result = f"{prefix} {outcome}" if prefix else outcome
+        return self.result
+
+
+def mines_embed(game: MinesGame, notice: str | None = None) -> discord.Embed:
+    description = notice or game.result or "Pick a square."
+    if game.finished and ("lose" in description.lower() or "timed out" in description.lower()):
+        color = discord.Color.red()
+    elif game.finished:
+        color = discord.Color.green()
+    else:
+        color = discord.Color.blurple()
+
+    embed = make_embed("Mines", description, color)
+    embed.add_field(name="Bet", value=f"${money(game.bet)}", inline=True)
+    embed.add_field(name="Mines", value=f"{game.mine_count}/{MINES_GRID_SIZE}", inline=True)
+    embed.add_field(name="Safe Picks", value=f"{len(game.revealed_safe)}/{game.safe_total}", inline=True)
+
+    if game.revealed_safe:
+        embed.add_field(name="Multiplier", value=f"{money(game.current_multiplier())}x", inline=True)
+        embed.add_field(name="Cashout", value=f"${money(game.current_payout())}", inline=True)
+    else:
+        embed.add_field(name="Multiplier", value="1.00x", inline=True)
+        embed.add_field(name="Cashout", value="Reveal first", inline=True)
+
+    embed.add_field(name="Balance", value=f"${money(game.balance)}", inline=True)
+    return embed
+
+
+def mines_control_embed(game: MinesGame) -> discord.Embed:
+    if game.finished:
+        description = game.result or "Game over."
+        color = discord.Color.red() if "lose" in description.lower() else discord.Color.green()
+    elif game.revealed_safe:
+        description = f"Cash out now for ${money(game.current_payout())}."
+        color = discord.Color.green()
+    else:
+        description = "Reveal a safe square before cashing out."
+        color = discord.Color.blurple()
+
+    return make_embed("Mines Controls", description, color)
+
+
+class MinesSession:
+    def __init__(self, game: MinesGame) -> None:
+        self.game = game
+        self.board_message: discord.Message | None = None
+        self.control_message: discord.Message | None = None
+        self.board_view = MinesBoardView(self)
+        self.control_view = MinesControlView(self)
+
+    async def reveal_square(self, interaction: discord.Interaction, index: int) -> None:
+        notice = self.game.reveal(index)
+        await self.update_after_interaction(interaction, notice)
+
+    async def cash_out(self, interaction: discord.Interaction) -> None:
+        notice = self.game.cash_out()
+        await self.update_after_interaction(interaction, notice)
+
+    async def update_after_interaction(self, interaction: discord.Interaction, notice: str) -> None:
+        await interaction.response.defer()
+        set_balance(self.game.user_id, self.game.balance)
+        if self.game.finished:
+            self.finish_session()
+        else:
+            self.refresh_views()
+        await self.edit_messages(notice)
+
+    async def expire(self) -> None:
+        if self.game.finished:
+            return
+
+        self.game.finished = True
+        self.game.result = "Game timed out. Current bet was forfeited."
+        set_balance(self.game.user_id, self.game.balance)
+        self.finish_session()
+        await self.edit_messages(self.game.result)
+
+    def refresh_views(self) -> None:
+        self.board_view.refresh_buttons()
+        self.control_view.refresh_buttons()
+
+    def finish_session(self) -> None:
+        active_mines_games.pop(self.game.user_id, None)
+        active_mines_sessions.pop(self.game.user_id, None)
+        self.refresh_views()
+        self.board_view.stop()
+        self.control_view.stop()
+
+    async def edit_messages(self, notice: str | None = None) -> None:
+        if self.board_message is not None:
+            await self.board_message.edit(embed=mines_embed(self.game, notice), view=self.board_view)
+        if self.control_message is not None:
+            await self.control_message.edit(embed=mines_control_embed(self.game), view=self.control_view)
+
+
+class MinesSquareButton(discord.ui.Button):
+    def __init__(self, session: MinesSession, index: int) -> None:
+        self.session = session
+        self.index = index
+        super().__init__(
+            label=str(index + 1),
+            style=discord.ButtonStyle.secondary,
+            row=index // 5,
+        )
+
+    def refresh(self) -> None:
+        game = self.session.game
+        self.disabled = game.finished or self.index in game.revealed_safe
+
+        if self.index in game.revealed_safe:
+            self.label = "Safe"
+            self.style = discord.ButtonStyle.success
+        elif game.finished and self.index in game.mines:
+            self.label = "Mine"
+            self.style = discord.ButtonStyle.danger
+        elif game.finished:
+            self.label = "Safe"
+            self.style = discord.ButtonStyle.secondary
+        else:
+            self.label = str(self.index + 1)
+            self.style = discord.ButtonStyle.secondary
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.session.reveal_square(interaction, self.index)
+
+
+class MinesBoardView(discord.ui.View):
+    def __init__(self, session: MinesSession) -> None:
+        super().__init__(timeout=180)
+        self.session = session
+        for index in range(MINES_GRID_SIZE):
+            self.add_item(MinesSquareButton(session, index))
+        self.refresh_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.session.game.user_id:
+            return True
+
+        await interaction.response.send_message("Only the player who started this mines game can use these buttons.", ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        await self.session.expire()
+
+    def refresh_buttons(self) -> None:
+        for item in self.children:
+            if isinstance(item, MinesSquareButton):
+                item.refresh()
+
+
+class MinesControlView(discord.ui.View):
+    def __init__(self, session: MinesSession) -> None:
+        super().__init__(timeout=180)
+        self.session = session
+        self.refresh_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.session.game.user_id:
+            return True
+
+        await interaction.response.send_message("Only the player who started this mines game can cash out.", ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        await self.session.expire()
+
+    def refresh_buttons(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = self.session.game.finished or not self.session.game.revealed_safe
+
+    @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.success)
+    async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.session.cash_out(interaction)
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -507,8 +797,11 @@ async def casino_help(ctx: commands.Context) -> None:
                 ".bj [bet] - start blackjack with buttons",
                 ".cf [bet] [heads/tails] - play coinflip",
                 ".dice [bet] [under/over] [target] - play dice with a 1% house edge",
+                ".mines [bet] [mines] - play a 25-square mines game",
+                ".redeem [code] - redeem a promo code",
                 ".addbal @user [amount] - developer role only",
                 ".removebal @user [amount] - developer role only",
+                ".promo [code] [amount] [people_limit] - developer role only",
                 ".testhand [cards] - developer role only; example: .testhand A K",
             ]
         ),
@@ -529,8 +822,9 @@ async def add_balance_command(ctx: commands.Context, target: discord.Member, amo
     if not await require_developer_role(ctx):
         return
 
-    if has_active_blackjack(target.id):
-        await ctx.send(f"{target.mention} has an active blackjack hand. Wait until it finishes before changing their balance.")
+    active_game = active_game_name(target.id)
+    if active_game is not None:
+        await ctx.send(f"{target.mention} has an active {active_game} game. Wait until it finishes before changing their balance.")
         return
 
     if amount < 1:
@@ -554,8 +848,9 @@ async def remove_balance_command(ctx: commands.Context, target: discord.Member, 
     if not await require_developer_role(ctx):
         return
 
-    if has_active_blackjack(target.id):
-        await ctx.send(f"{target.mention} has an active blackjack hand. Wait until it finishes before changing their balance.")
+    active_game = active_game_name(target.id)
+    if active_game is not None:
+        await ctx.send(f"{target.mention} has an active {active_game} game. Wait until it finishes before changing their balance.")
         return
 
     if amount < 1:
@@ -572,10 +867,72 @@ async def remove_balance_command(ctx: commands.Context, target: discord.Member, 
     )
 
 
+@bot.command(name="promo")
+@commands.guild_only()
+@developer_only()
+async def promo_command(ctx: commands.Context, code: str, amount: int, people_limit: int = 1) -> None:
+    if not await require_developer_role(ctx):
+        return
+
+    normalized_code = normalize_promo_code(code)
+    if not valid_promo_code(normalized_code):
+        await ctx.send("Promo codes must be 3-32 characters using letters, numbers, hyphens, or underscores.")
+        return
+
+    if amount < 1:
+        await ctx.send("Promo amount must be at least 1.")
+        return
+
+    if people_limit < 1:
+        await ctx.send("Promo people limit must be at least 1.")
+        return
+
+    promo_codes[normalized_code] = PromoCode(code=normalized_code, amount=amount, max_people=people_limit)
+    await ctx.send(
+        embed=make_embed(
+            "Promo Created",
+            f"Code `{normalized_code}` gives ${money(amount)} and can be redeemed by {people_limit} unique user{'s' if people_limit != 1 else ''}.",
+        )
+    )
+
+
+@bot.command(name="redeem")
+async def redeem_command(ctx: commands.Context, code: str) -> None:
+    active_game = active_game_name(ctx.author.id)
+    if active_game is not None:
+        await ctx.send(f"Finish your active {active_game} game before redeeming a promo code.")
+        return
+
+    normalized_code = normalize_promo_code(code)
+    promo = promo_codes.get(normalized_code)
+    if promo is None:
+        await ctx.send("That promo code does not exist.")
+        return
+
+    can_redeem, reason = promo.can_redeem(ctx.author.id)
+    if not can_redeem:
+        await ctx.send(reason)
+        return
+
+    promo.redeemed_by.add(ctx.author.id)
+    balance = balance_for(ctx.author.id) + promo.amount
+    set_balance(ctx.author.id, balance)
+    await ctx.send(
+        embed=make_embed(
+            "Promo Redeemed",
+            f"Redeemed `{promo.code}` for ${money(promo.amount)}.\n"
+            f"New balance: ${money(balance)}.\n"
+            f"Remaining redemptions: {promo.people_left}.",
+            discord.Color.green(),
+        )
+    )
+
+
 @bot.command(name="cf")
 async def coinflip_command(ctx: commands.Context, requested_bet: int, side: str) -> None:
-    if has_active_blackjack(ctx.author.id):
-        await ctx.send("Finish your active blackjack hand before starting another game.")
+    active_game = active_game_name(ctx.author.id)
+    if active_game is not None:
+        await ctx.send(f"Finish your active {active_game} game before starting another game.")
         return
 
     side = side.lower()
@@ -611,8 +968,9 @@ async def coinflip_command(ctx: commands.Context, requested_bet: int, side: str)
 
 @bot.command(name="dice")
 async def dice_command(ctx: commands.Context, requested_bet: int, direction: str, target: float) -> None:
-    if has_active_blackjack(ctx.author.id):
-        await ctx.send("Finish your active blackjack hand before starting another game.")
+    active_game = active_game_name(ctx.author.id)
+    if active_game is not None:
+        await ctx.send(f"Finish your active {active_game} game before starting another game.")
         return
 
     direction = direction.lower()
@@ -664,6 +1022,34 @@ async def dice_command(ctx: commands.Context, requested_bet: int, direction: str
     await ctx.send(embed=make_embed("Dice", "\n".join(line for line in lines if line), color))
 
 
+@bot.command(name="mines")
+async def mines_command(ctx: commands.Context, requested_bet: int, mine_count: int) -> None:
+    active_game = active_game_name(ctx.author.id)
+    if active_game is not None:
+        await ctx.send(f"Finish your active {active_game} game before starting mines.")
+        return
+
+    if mine_count < 1 or mine_count >= MINES_GRID_SIZE:
+        await ctx.send(f"Mine count must be from 1 to {MINES_GRID_SIZE - 1}.")
+        return
+
+    balance = balance_for(ctx.author.id)
+    bet, warning = normalized_bet(balance, requested_bet)
+    if bet is None:
+        await ctx.send(warning)
+        return
+
+    game = MinesGame.start(ctx.author.id, balance, bet, mine_count)
+    active_mines_games[ctx.author.id] = game
+    set_balance(ctx.author.id, game.balance)
+
+    session = MinesSession(game)
+    active_mines_sessions[ctx.author.id] = session
+    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}."
+    session.board_message = await ctx.send(embed=mines_embed(game, notice), view=session.board_view)
+    session.control_message = await ctx.send(embed=mines_control_embed(game), view=session.control_view)
+
+
 @bot.command(name="testhand")
 @commands.guild_only()
 @developer_only()
@@ -705,8 +1091,9 @@ async def test_hand_command(ctx: commands.Context, *card_labels: str) -> None:
 
 @bot.command(name="bj")
 async def blackjack_command(ctx: commands.Context, requested_bet: int) -> None:
-    if ctx.author.id in active_blackjack_games:
-        await ctx.send("You already have an active blackjack hand.")
+    active_game = active_game_name(ctx.author.id)
+    if active_game is not None:
+        await ctx.send(f"Finish your active {active_game} game before starting blackjack.")
         return
 
     balance = balance_for(ctx.author.id)
@@ -725,11 +1112,27 @@ async def blackjack_command(ctx: commands.Context, requested_bet: int) -> None:
     view.message = await ctx.send(embed=blackjack_embed(game, notice), view=view)
 
 
+def command_usage(command_name: str | None) -> str | None:
+    usages = {
+        "addbal": ".addbal @user amount",
+        "removebal": ".removebal @user amount",
+        "promo": ".promo code amount [people_limit]",
+        "redeem": ".redeem code",
+        "mines": ".mines bet mines",
+        "cf": ".cf bet heads",
+        "dice": ".dice bet under target",
+        "bj": ".bj bet",
+        "testhand": ".testhand A K",
+    }
+    return usages.get(command_name or "")
+
+
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.MissingRequiredArgument):
-        if ctx.command and ctx.command.name in ("addbal", "removebal"):
-            await ctx.send(f"Use `.{ctx.command.name} @user amount`.")
+        usage = command_usage(ctx.command.name if ctx.command else None)
+        if usage is not None:
+            await ctx.send(f"Use `{usage}`.")
         else:
             await ctx.send("Missing command argument. Use `.help` to see the command format.")
     elif isinstance(error, commands.NoPrivateMessage):
@@ -737,8 +1140,9 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
     elif isinstance(error, commands.CheckFailure):
         await ctx.send("You need the developer role to use that command.")
     elif isinstance(error, commands.BadArgument):
-        if ctx.command and ctx.command.name in ("addbal", "removebal"):
-            await ctx.send(f"Use `.{ctx.command.name} @user amount`.")
+        usage = command_usage(ctx.command.name if ctx.command else None)
+        if usage is not None:
+            await ctx.send(f"Use `{usage}`.")
         else:
             await ctx.send("Please check your command numbers and try again.")
     elif isinstance(error, commands.CommandNotFound):
