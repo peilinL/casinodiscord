@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: discord-casino-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python casino_3_discord.py
+    healthCheckPath: /
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false

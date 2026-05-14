@@ -57,10 +57,11 @@ def start_render_health_server() -> None:
     print(f"Health server listening on port {port}")
 
 
-STARTING_BALANCE = 1000
+STARTING_BALANCE = 250
 COMMAND_PREFIX = "."
 DEVELOPER_ROLE_NAME = "developer"
 COINFLIP_WIN_RATE = 0.45
+BLACKJACK_WIN_RETURN = 1.95
 MINES_GRID_SIZE = 25
 MINES_HOUSE_EDGE = 0.99
 
@@ -380,12 +381,12 @@ class BlackjackGame:
         dealer_total = hand_value(self.dealer_cards)
 
         if dealer_total > 21:
-            self.balance = round(self.balance + 2 * self.bet, 2)
+            self.balance = round(self.balance + BLACKJACK_WIN_RETURN * self.bet, 2)
             outcome = "Dealer busts. You win."
         elif dealer_total > player_total:
             outcome = "You lost."
         elif dealer_total < player_total:
-            self.balance = round(self.balance + 2 * self.bet, 2)
+            self.balance = round(self.balance + BLACKJACK_WIN_RETURN * self.bet, 2)
             outcome = "You win."
         else:
             self.balance = round(self.balance + self.bet, 2)
@@ -414,12 +415,12 @@ class BlackjackGame:
             if index in self.busted_hands or total > 21:
                 results.append(f"Hand {index + 1} lost.")
             elif dealer_total > 21:
-                self.balance = round(self.balance + 2 * bet, 2)
+                self.balance = round(self.balance + BLACKJACK_WIN_RETURN * bet, 2)
                 results.append(f"Dealer busts. Hand {index + 1} wins.")
             elif dealer_total > total:
                 results.append(f"Hand {index + 1} lost.")
             elif dealer_total < total:
-                self.balance = round(self.balance + 2 * bet, 2)
+                self.balance = round(self.balance + BLACKJACK_WIN_RETURN * bet, 2)
                 results.append(f"Hand {index + 1} wins.")
             else:
                 self.balance = round(self.balance + bet, 2)
