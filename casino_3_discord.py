@@ -114,6 +114,7 @@ CARD_ALIASES = {
 
 balances: dict[int, float] = {}
 processed_command_messages: set[int] = set()
+last_command_claim_error: str | None = None
 active_blackjack_games: dict[int, "BlackjackGame"] = {}
 active_blackjack_views: dict[int, "BlackjackView"] = {}
 active_mines_games: dict[int, "MinesGame"] = {}
@@ -259,6 +260,9 @@ def leaderboard_balances(limit: int = 10) -> list[tuple[int, float]]:
 
 
 def claim_command_message(message_id: int) -> bool:
+    global last_command_claim_error
+    last_command_claim_error = None
+
     if not supabase_enabled():
         if message_id in processed_command_messages:
             return False
@@ -275,10 +279,12 @@ def claim_command_message(message_id: int) -> bool:
     except HTTPError as error:
         if error.code == 409:
             return False
-        print(f"Could not claim command message {message_id} in Supabase: {error}")
+        last_command_claim_error = f"HTTP {error.code}"
+        print(f"Could not claim command message {message_id} in Supabase: {error}", flush=True)
         return False
     except (URLError, TimeoutError, OSError, ValueError) as error:
-        print(f"Could not claim command message {message_id} in Supabase: {error}")
+        last_command_claim_error = type(error).__name__
+        print(f"Could not claim command message {message_id} in Supabase: {error}", flush=True)
         return False
 
     return True
@@ -1009,8 +1015,17 @@ async def on_message(message: discord.Message) -> None:
     if message.author.bot or not message.content.startswith(COMMAND_PREFIX):
         return
 
+    command_name = message.content[len(COMMAND_PREFIX):].split(maxsplit=1)[0].lower()
+    if command_name == "dbstatus":
+        await bot.process_commands(message)
+        return
+
     if not claim_command_message(message.id):
-        print(f"Skipped duplicate command message {message.id}")
+        if last_command_claim_error is not None:
+            await message.channel.send(
+                "Command guard database is not ready. Run the `processed_command_messages` SQL table setup, then try again."
+            )
+        print(f"Skipped duplicate command message {message.id}", flush=True)
         return
 
     await bot.process_commands(message)
@@ -1100,6 +1115,20 @@ async def dbstatus_command(ctx: commands.Context) -> None:
         else:
             row_count = len(rows) if isinstance(rows, list) else 0
             lines.append(f"Supabase test: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
+
+        try:
+            guard_rows = supabase_request(
+                "GET",
+                "processed_command_messages",
+                query={"select": "message_id", "limit": "1"},
+            )
+        except HTTPError as error:
+            lines.append(f"Command guard table: failed with HTTP {error.code}")
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            lines.append(f"Command guard table: failed ({type(error).__name__})")
+        else:
+            row_count = len(guard_rows) if isinstance(guard_rows, list) else 0
+            lines.append(f"Command guard table: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
     else:
         lines.append("Supabase test: skipped because env vars are missing")
 
