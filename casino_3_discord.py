@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 try:
@@ -14,6 +16,44 @@ else:
 
 import discord
 from discord.ext import commands
+
+
+def load_env_file(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+
+    with open(path, encoding="utf-8") as env_file:
+        for line in env_file:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
+
+
+def start_render_health_server() -> None:
+    port = os.getenv("PORT")
+    if not port:
+        return
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Casino bot is running.\n")
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("0.0.0.0", int(port)), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"Health server listening on port {port}")
 
 
 STARTING_BALANCE = 1000
@@ -711,6 +751,7 @@ def main() -> None:
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise RuntimeError("Set the DISCORD_TOKEN environment variable before running the bot.")
+    start_render_health_server()
     bot.run(token)
 
 
