@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 import threading
 from math import comb
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 
 try:
@@ -78,6 +82,9 @@ COINFLIP_WIN_RATE = 0.45
 BLACKJACK_WIN_RETURN = 1.95
 MINES_GRID_SIZE = 25
 MINES_HOUSE_EDGE = 0.99
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_BALANCES_TABLE = os.getenv("SUPABASE_BALANCES_TABLE", "player_balances")
 
 CARD_VALUES = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10]
 CARD_LABELS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
@@ -114,14 +121,95 @@ def money(amount: float) -> str:
     return f"{amount:.2f}"
 
 
+def supabase_enabled() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def supabase_request(
+    method: str,
+    path: str,
+    payload: object | None = None,
+    query: dict[str, str] | None = None,
+    prefer: str | None = None,
+) -> object | None:
+    if not supabase_enabled():
+        return None
+
+    url = f"{SUPABASE_URL}/rest/v1/{path}"
+    if query:
+        url = f"{url}?{urlencode(query)}"
+
+    body = None
+    headers = {
+        "apikey": SUPABASE_KEY or "",
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    if prefer is not None:
+        headers["Prefer"] = prefer
+
+    request = Request(url, data=body, headers=headers, method=method)
+    with urlopen(request, timeout=10) as response:
+        response_body = response.read()
+        if not response_body:
+            return None
+        return json.loads(response_body.decode("utf-8"))
+
+
+def fetch_balance_from_supabase(user_id: int) -> float | None:
+    try:
+        rows = supabase_request(
+            "GET",
+            SUPABASE_BALANCES_TABLE,
+            query={
+                "select": "balance",
+                "user_id": f"eq.{user_id}",
+                "limit": "1",
+            },
+        )
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not fetch balance for {user_id} from Supabase: {error}")
+        return None
+
+    if isinstance(rows, list) and rows:
+        return round(float(rows[0]["balance"]), 2)
+    return None
+
+
+def save_balance_to_supabase(user_id: int, amount: float) -> None:
+    try:
+        supabase_request(
+            "POST",
+            SUPABASE_BALANCES_TABLE,
+            payload={
+                "user_id": str(user_id),
+                "balance": round(amount, 2),
+            },
+            query={"on_conflict": "user_id"},
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not save balance for {user_id} to Supabase: {error}")
+
+
 def balance_for(user_id: int) -> float:
     if user_id not in balances:
-        balances[user_id] = float(STARTING_BALANCE)
+        balance = fetch_balance_from_supabase(user_id)
+        if balance is None:
+            balance = float(STARTING_BALANCE)
+            save_balance_to_supabase(user_id, balance)
+        balances[user_id] = balance
     return balances[user_id]
 
 
 def set_balance(user_id: int, amount: float) -> None:
-    balances[user_id] = round(amount, 2)
+    balance = round(amount, 2)
+    balances[user_id] = balance
+    save_balance_to_supabase(user_id, balance)
 
 
 def normalize_promo_code(code: str) -> str:
@@ -800,6 +888,7 @@ bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=
 @bot.event
 async def on_ready() -> None:
     print(f"Casino bot ready as {bot.user}")
+    print(f"Balance storage: {'Supabase' if supabase_enabled() else 'memory'}")
 
 
 @bot.command(name="help")
