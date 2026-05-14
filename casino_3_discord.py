@@ -72,7 +72,7 @@ def start_render_health_server() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", int(port)), HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    print(f"Health server listening on port {port}")
+    print(f"Health server listening on port {port}", flush=True)
 
 
 STARTING_BALANCE = 250
@@ -84,7 +84,9 @@ LOW_BET_RETURN = 0.925
 HIGH_BET_RETURN = 0.85
 MINES_GRID_SIZE = 25
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
 SUPABASE_BALANCES_TABLE = os.getenv("SUPABASE_BALANCES_TABLE", "player_balances")
 
 CARD_VALUES = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10]
@@ -139,6 +141,14 @@ class BalanceStorageError(RuntimeError):
 
 def supabase_enabled() -> bool:
     return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def log_storage_status() -> None:
+    storage = "Supabase" if supabase_enabled() else "memory"
+    print(f"Balance storage: {storage}", flush=True)
+    print(f"SUPABASE_URL set: {'yes' if SUPABASE_URL else 'no'}", flush=True)
+    print(f"SUPABASE_SERVICE_ROLE_KEY set: {'yes' if SUPABASE_SERVICE_ROLE_KEY else 'no'}", flush=True)
+    print(f"SUPABASE_ANON_KEY fallback set: {'yes' if SUPABASE_ANON_KEY else 'no'}", flush=True)
 
 
 def supabase_request(
@@ -266,10 +276,10 @@ def claim_command_message(message_id: int) -> bool:
         if error.code == 409:
             return False
         print(f"Could not claim command message {message_id} in Supabase: {error}")
-        return True
+        return False
     except (URLError, TimeoutError, OSError, ValueError) as error:
         print(f"Could not claim command message {message_id} in Supabase: {error}")
-        return True
+        return False
 
     return True
 
@@ -990,8 +1000,8 @@ bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=
 
 @bot.event
 async def on_ready() -> None:
-    print(f"Casino bot ready as {bot.user}")
-    print(f"Balance storage: {'Supabase' if supabase_enabled() else 'memory'}")
+    print(f"Casino bot ready as {bot.user}", flush=True)
+    log_storage_status()
 
 
 @bot.event
@@ -1021,6 +1031,7 @@ async def casino_help(ctx: commands.Context) -> None:
                 ".dice [bet] [under/over] [target] - play dice",
                 ".mines [bet] [mines] - play a 25-square mines game",
                 ".redeem [code] - redeem a promo code",
+                ".dbstatus - developer role only; check Supabase connection",
                 ".addbal @user [amount] - developer role only",
                 ".removebal @user [amount] - developer role only",
                 ".promo [code] [amount] [people_limit] - developer role only",
@@ -1058,6 +1069,41 @@ async def leaderboard_command(ctx: commands.Context) -> None:
         for rank, (user_id, balance) in enumerate(leaderboard, start=1)
     ]
     await ctx.send(embed=make_embed("Leaderboard", "\n".join(lines), discord.Color.gold()))
+
+
+@bot.command(name="dbstatus")
+@commands.guild_only()
+@developer_only()
+async def dbstatus_command(ctx: commands.Context) -> None:
+    if not await require_developer_role(ctx):
+        return
+
+    lines = [
+        f"Balance storage: {'Supabase' if supabase_enabled() else 'memory'}",
+        f"SUPABASE_URL set: {'yes' if SUPABASE_URL else 'no'}",
+        f"SUPABASE_SERVICE_ROLE_KEY set: {'yes' if SUPABASE_SERVICE_ROLE_KEY else 'no'}",
+        f"SUPABASE_ANON_KEY fallback set: {'yes' if SUPABASE_ANON_KEY else 'no'}",
+        f"Balances table: `{SUPABASE_BALANCES_TABLE}`",
+    ]
+
+    if supabase_enabled():
+        try:
+            rows = supabase_request(
+                "GET",
+                SUPABASE_BALANCES_TABLE,
+                query={"select": "user_id,balance", "limit": "1"},
+            )
+        except HTTPError as error:
+            lines.append(f"Supabase test: failed with HTTP {error.code}")
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            lines.append(f"Supabase test: failed ({type(error).__name__})")
+        else:
+            row_count = len(rows) if isinstance(rows, list) else 0
+            lines.append(f"Supabase test: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
+    else:
+        lines.append("Supabase test: skipped because env vars are missing")
+
+    await ctx.send(embed=make_embed("Database Status", "\n".join(lines)))
 
 
 @bot.command(name="tip")
@@ -1395,6 +1441,7 @@ def command_usage(command_name: str | None) -> str | None:
         "leaderboard": ".leaderboard",
         "lb": ".leaderboard",
         "tip": ".tip @user amount",
+        "dbstatus": ".dbstatus",
         "addbal": ".addbal @user amount",
         "removebal": ".removebal @user amount",
         "promo": ".promo code amount [people_limit]",
@@ -1442,6 +1489,7 @@ def main() -> None:
     if not token:
         raise RuntimeError("Set the DISCORD_TOKEN environment variable before running the bot.")
     start_render_health_server()
+    log_storage_status()
     bot.run(token)
 
 
