@@ -1047,10 +1047,6 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if not claim_command_message(message.id):
-        if last_command_claim_error is not None:
-            await message.channel.send(
-                "Command guard database is not ready. Run the `processed_command_messages` SQL table setup, then try again."
-            )
         print(f"Skipped duplicate command message {message.id}", flush=True)
         return
 
