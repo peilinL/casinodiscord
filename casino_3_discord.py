@@ -280,10 +280,11 @@ def claim_command_message(message_id: int) -> bool:
     global last_command_claim_error
     last_command_claim_error = None
 
+    if message_id in processed_command_messages:
+        return False
+    processed_command_messages.add(message_id)
+
     if not supabase_enabled():
-        if message_id in processed_command_messages:
-            return False
-        processed_command_messages.add(message_id)
         return True
 
     try:
@@ -297,12 +298,20 @@ def claim_command_message(message_id: int) -> bool:
         if error.code == 409:
             return False
         last_command_claim_error = f"HTTP {error.code}"
-        print(f"Could not claim command message {message_id} in Supabase: {error}", flush=True)
-        return False
+        print(
+            f"Could not claim command message {message_id} in Supabase. "
+            f"Using local duplicate guard only: {error}",
+            flush=True,
+        )
+        return True
     except (URLError, TimeoutError, OSError, ValueError) as error:
         last_command_claim_error = type(error).__name__
-        print(f"Could not claim command message {message_id} in Supabase: {error}", flush=True)
-        return False
+        print(
+            f"Could not claim command message {message_id} in Supabase. "
+            f"Using local duplicate guard only: {error}",
+            flush=True,
+        )
+        return True
 
     return True
 
