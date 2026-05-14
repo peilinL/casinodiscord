@@ -78,11 +78,11 @@ def start_render_health_server() -> None:
 STARTING_BALANCE = 250
 COMMAND_PREFIX = "."
 DEVELOPER_ROLE_NAME = "developer"
-COINFLIP_WIN_RATE = 0.40
-BLACKJACK_WIN_RETURN = 1.85
-DICE_HOUSE_RETURN = 0.94
+COINFLIP_WIN_RATE = 0.50
+HIGH_BET_THRESHOLD = 1000
+LOW_BET_RETURN = 0.925
+HIGH_BET_RETURN = 0.85
 MINES_GRID_SIZE = 25
-MINES_HOUSE_EDGE = 0.94
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_BALANCES_TABLE = os.getenv("SUPABASE_BALANCES_TABLE", "player_balances")
@@ -121,6 +121,20 @@ promo_codes: dict[str, "PromoCode"] = {}
 
 def money(amount: float) -> str:
     return f"{amount:.2f}"
+
+
+def bet_return_rate(bet: int) -> float:
+    if bet > HIGH_BET_THRESHOLD:
+        return HIGH_BET_RETURN
+    return LOW_BET_RETURN
+
+
+def even_money_win_return(bet: int) -> float:
+    return 2 * bet_return_rate(bet)
+
+
+class BalanceStorageError(RuntimeError):
+    pass
 
 
 def supabase_enabled() -> bool:
@@ -163,6 +177,9 @@ def supabase_request(
 
 
 def fetch_balance_from_supabase(user_id: int) -> float | None:
+    if not supabase_enabled():
+        return None
+
     try:
         rows = supabase_request(
             "GET",
@@ -175,14 +192,19 @@ def fetch_balance_from_supabase(user_id: int) -> float | None:
         )
     except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
         print(f"Could not fetch balance for {user_id} from Supabase: {error}")
-        return None
+        raise BalanceStorageError("Balance database is temporarily unavailable. Try again in a minute.") from error
 
     if isinstance(rows, list) and rows:
         return round(float(rows[0]["balance"]), 2)
+    if not isinstance(rows, list):
+        raise BalanceStorageError("Balance database returned an unexpected response. Try again in a minute.")
     return None
 
 
 def save_balance_to_supabase(user_id: int, amount: float) -> None:
+    if not supabase_enabled():
+        return
+
     try:
         supabase_request(
             "POST",
@@ -196,6 +218,7 @@ def save_balance_to_supabase(user_id: int, amount: float) -> None:
         )
     except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
         print(f"Could not save balance for {user_id} to Supabase: {error}")
+        raise BalanceStorageError("Balance database is temporarily unavailable. Try again in a minute.") from error
 
 
 def leaderboard_balances(limit: int = 10) -> list[tuple[int, float]]:
@@ -253,18 +276,21 @@ def claim_command_message(message_id: int) -> bool:
 
 def balance_for(user_id: int) -> float:
     if user_id not in balances:
-        balance = fetch_balance_from_supabase(user_id)
-        if balance is None:
+        if supabase_enabled():
+            balance = fetch_balance_from_supabase(user_id)
+            if balance is None:
+                balance = float(STARTING_BALANCE)
+                save_balance_to_supabase(user_id, balance)
+        else:
             balance = float(STARTING_BALANCE)
-            save_balance_to_supabase(user_id, balance)
         balances[user_id] = balance
     return balances[user_id]
 
 
 def set_balance(user_id: int, amount: float) -> None:
     balance = round(amount, 2)
-    balances[user_id] = balance
     save_balance_to_supabase(user_id, balance)
+    balances[user_id] = balance
 
 
 def normalize_promo_code(code: str) -> str:
@@ -276,13 +302,13 @@ def valid_promo_code(code: str) -> bool:
     return 3 <= len(code) <= 32 and all(character in allowed for character in code)
 
 
-def mines_multiplier(mine_count: int, revealed_safe: int) -> float:
+def mines_multiplier(mine_count: int, revealed_safe: int, bet: int) -> float:
     if revealed_safe < 1:
         return 1.0
 
     safe_squares = MINES_GRID_SIZE - mine_count
     fair_multiplier = comb(MINES_GRID_SIZE, revealed_safe) / comb(safe_squares, revealed_safe)
-    return round(fair_multiplier * MINES_HOUSE_EDGE, 4)
+    return round(fair_multiplier * bet_return_rate(bet), 4)
 
 
 def draw_card() -> int:
@@ -538,12 +564,12 @@ class BlackjackGame:
         dealer_total = hand_value(self.dealer_cards)
 
         if dealer_total > 21:
-            self.balance = round(self.balance + BLACKJACK_WIN_RETURN * self.bet, 2)
+            self.balance = round(self.balance + even_money_win_return(self.bet) * self.bet, 2)
             outcome = "Dealer busts. You win."
         elif dealer_total > player_total:
             outcome = "You lost."
         elif dealer_total < player_total:
-            self.balance = round(self.balance + BLACKJACK_WIN_RETURN * self.bet, 2)
+            self.balance = round(self.balance + even_money_win_return(self.bet) * self.bet, 2)
             outcome = "You win."
         else:
             self.balance = round(self.balance + self.bet, 2)
@@ -572,12 +598,12 @@ class BlackjackGame:
             if index in self.busted_hands or total > 21:
                 results.append(f"Hand {index + 1} lost.")
             elif dealer_total > 21:
-                self.balance = round(self.balance + BLACKJACK_WIN_RETURN * bet, 2)
+                self.balance = round(self.balance + even_money_win_return(bet) * bet, 2)
                 results.append(f"Dealer busts. Hand {index + 1} wins.")
             elif dealer_total > total:
                 results.append(f"Hand {index + 1} lost.")
             elif dealer_total < total:
-                self.balance = round(self.balance + BLACKJACK_WIN_RETURN * bet, 2)
+                self.balance = round(self.balance + even_money_win_return(bet) * bet, 2)
                 results.append(f"Hand {index + 1} wins.")
             else:
                 self.balance = round(self.balance + bet, 2)
@@ -643,7 +669,10 @@ class BlackjackView(discord.ui.View):
         self.game.result = "Game timed out. Current bet was forfeited."
         active_blackjack_games.pop(self.game.user_id, None)
         active_blackjack_views.pop(self.game.user_id, None)
-        set_balance(self.game.user_id, self.game.balance)
+        try:
+            set_balance(self.game.user_id, self.game.balance)
+        except BalanceStorageError as error:
+            print(f"Could not save timed-out blackjack game for {self.game.user_id}: {error}")
         self.disable_buttons()
 
         if self.message is not None:
@@ -667,8 +696,19 @@ class BlackjackView(discord.ui.View):
             if isinstance(item, discord.ui.Button) and item.label == label:
                 item.disabled = disabled
 
+    async def send_storage_error(self, interaction: discord.Interaction, error: BalanceStorageError) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(str(error), ephemeral=True)
+        else:
+            await interaction.response.send_message(str(error), ephemeral=True)
+
     async def update_game(self, interaction: discord.Interaction, notice: str) -> None:
-        set_balance(self.game.user_id, self.game.balance)
+        try:
+            set_balance(self.game.user_id, self.game.balance)
+        except BalanceStorageError as error:
+            await self.send_storage_error(interaction, error)
+            return
+
         if self.game.finished:
             active_blackjack_games.pop(self.game.user_id, None)
             active_blackjack_views.pop(self.game.user_id, None)
@@ -722,7 +762,7 @@ class MinesGame:
         return MINES_GRID_SIZE - self.mine_count
 
     def current_multiplier(self) -> float:
-        return mines_multiplier(self.mine_count, len(self.revealed_safe))
+        return mines_multiplier(self.mine_count, len(self.revealed_safe), self.bet)
 
     def current_payout(self) -> float:
         return round(self.bet * self.current_multiplier(), 2)
@@ -818,7 +858,12 @@ class MinesSession:
 
     async def update_after_interaction(self, interaction: discord.Interaction, notice: str) -> None:
         await interaction.response.defer()
-        set_balance(self.game.user_id, self.game.balance)
+        try:
+            set_balance(self.game.user_id, self.game.balance)
+        except BalanceStorageError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+            return
+
         if self.game.finished:
             self.finish_session()
         else:
@@ -831,7 +876,10 @@ class MinesSession:
 
         self.game.finished = True
         self.game.result = "Game timed out. Current bet was forfeited."
-        set_balance(self.game.user_id, self.game.balance)
+        try:
+            set_balance(self.game.user_id, self.game.balance)
+        except BalanceStorageError as error:
+            print(f"Could not save timed-out mines game for {self.game.user_id}: {error}")
         self.finish_session()
         await self.edit_messages(self.game.result)
 
@@ -967,6 +1015,7 @@ async def casino_help(ctx: commands.Context) -> None:
                 ".bal - check your balance",
                 ".bal @user - developer role only; check another user's balance",
                 ".leaderboard - show top balances",
+                ".tip @user [amount] - send balance to another player",
                 ".bj [bet] - start blackjack with buttons",
                 ".cf [bet] [heads/tails] - play coinflip",
                 ".dice [bet] [under/over] [target] - play dice",
@@ -1011,16 +1060,52 @@ async def leaderboard_command(ctx: commands.Context) -> None:
     await ctx.send(embed=make_embed("Leaderboard", "\n".join(lines), discord.Color.gold()))
 
 
+@bot.command(name="tip")
+@commands.guild_only()
+async def tip_command(ctx: commands.Context, target: discord.Member, amount: int) -> None:
+    if amount < 1:
+        await ctx.send("Please enter a positive integer amount.")
+        return
+
+    if target.bot:
+        await ctx.send("You cannot tip bots.")
+        return
+
+    if target.id == ctx.author.id:
+        await ctx.send("You cannot tip yourself.")
+        return
+
+    sender_active_game = active_game_name(ctx.author.id)
+    if sender_active_game is not None:
+        await ctx.send(f"Finish your active {sender_active_game} game before sending a tip.")
+        return
+
+    sender_balance = balance_for(ctx.author.id)
+    if amount > sender_balance:
+        await ctx.send("You do not have enough balance for that tip.")
+        return
+
+    target_balance = balance_for(target.id)
+    sender_balance = round(sender_balance - amount, 2)
+    target_balance = round(target_balance + amount, 2)
+    set_balance(ctx.author.id, sender_balance)
+    set_balance(target.id, target_balance)
+
+    await ctx.send(
+        embed=make_embed(
+            "Tip Sent",
+            f"{ctx.author.mention} sent ${money(amount)} to {target.mention}.\n"
+            f"Your new balance: ${money(sender_balance)}.",
+            discord.Color.green(),
+        )
+    )
+
+
 @bot.command(name="addbal")
 @commands.guild_only()
 @developer_only()
 async def add_balance_command(ctx: commands.Context, target: discord.Member, amount: int) -> None:
     if not await require_developer_role(ctx):
-        return
-
-    active_game = active_game_name(target.id)
-    if active_game is not None:
-        await ctx.send(f"{target.mention} has an active {active_game} game. Wait until it finishes before changing their balance.")
         return
 
     if amount < 1:
@@ -1042,11 +1127,6 @@ async def add_balance_command(ctx: commands.Context, target: discord.Member, amo
 @developer_only()
 async def remove_balance_command(ctx: commands.Context, target: discord.Member, amount: int) -> None:
     if not await require_developer_role(ctx):
-        return
-
-    active_game = active_game_name(target.id)
-    if active_game is not None:
-        await ctx.send(f"{target.mention} has an active {active_game} game. Wait until it finishes before changing their balance.")
         return
 
     if amount < 1:
@@ -1150,7 +1230,8 @@ async def coinflip_command(ctx: commands.Context, requested_bet: int, side: str)
         result = "tails" if side == "heads" else "heads"
 
     if won:
-        balance = round(balance + 2 * bet, 2)
+        payout = round(even_money_win_return(bet) * bet, 2)
+        balance = round(balance + payout, 2)
         outcome = f"{result.title()}! You win."
         color = discord.Color.green()
     else:
@@ -1189,7 +1270,7 @@ async def dice_command(ctx: commands.Context, requested_bet: int, direction: str
         await ctx.send(warning)
         return
 
-    multiplier = 100 * DICE_HOUSE_RETURN / win_chance
+    multiplier = 100 * bet_return_rate(bet) / win_chance
     roll = random.randint(0, 9999) / 100
     won = roll < target if direction == "under" else roll > target
 
@@ -1236,8 +1317,8 @@ async def mines_command(ctx: commands.Context, requested_bet: int, mine_count: i
         return
 
     game = MinesGame.start(ctx.author.id, balance, bet, mine_count)
-    active_mines_games[ctx.author.id] = game
     set_balance(ctx.author.id, game.balance)
+    active_mines_games[ctx.author.id] = game
 
     session = MinesSession(game)
     active_mines_sessions[ctx.author.id] = session
@@ -1299,8 +1380,8 @@ async def blackjack_command(ctx: commands.Context, requested_bet: int) -> None:
         return
 
     game = BlackjackGame.start(ctx.author.id, balance, bet)
-    active_blackjack_games[ctx.author.id] = game
     set_balance(ctx.author.id, game.balance)
+    active_blackjack_games[ctx.author.id] = game
 
     view = BlackjackView(game)
     active_blackjack_views[ctx.author.id] = view
@@ -1313,6 +1394,7 @@ def command_usage(command_name: str | None) -> str | None:
         "bal": ".bal [@user]",
         "leaderboard": ".leaderboard",
         "lb": ".leaderboard",
+        "tip": ".tip @user amount",
         "addbal": ".addbal @user amount",
         "removebal": ".removebal @user amount",
         "promo": ".promo code amount [people_limit]",
@@ -1328,7 +1410,12 @@ def command_usage(command_name: str | None) -> str | None:
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
-    if isinstance(error, commands.MissingRequiredArgument):
+    original_error = getattr(error, "original", None)
+    if isinstance(error, BalanceStorageError):
+        await ctx.send(str(error))
+    elif isinstance(original_error, BalanceStorageError):
+        await ctx.send(str(original_error))
+    elif isinstance(error, commands.MissingRequiredArgument):
         usage = command_usage(ctx.command.name if ctx.command else None)
         if usage is not None:
             await ctx.send(f"Use `{usage}`.")
