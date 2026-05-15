@@ -83,6 +83,17 @@ HIGH_BET_THRESHOLD = 1000
 LOW_BET_RETURN = 0.925
 HIGH_BET_RETURN = 0.85
 MINES_GRID_SIZE = 25
+SLOT_SYMBOLS = ["7", "BAR", "Bell", "Cherry", "Lemon", "Diamond"]
+SLOT_WEIGHTS = [1, 2, 3, 5, 6, 8]
+SLOT_THREE_MATCH_MULTIPLIERS = {
+    "7": 12,
+    "BAR": 8,
+    "Diamond": 6,
+    "Bell": 5,
+    "Cherry": 4,
+    "Lemon": 3,
+}
+SLOT_TWO_MATCH_MULTIPLIER = 1.25
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
@@ -383,6 +394,19 @@ def parse_cards(labels: tuple[str, ...]) -> list[int] | None:
             return None
         cards.append(card)
     return cards
+
+
+def spin_slots() -> list[str]:
+    return random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
+
+
+def slots_multiplier(reels: list[str]) -> float:
+    counts = {symbol: reels.count(symbol) for symbol in set(reels)}
+    if 3 in counts.values():
+        return SLOT_THREE_MATCH_MULTIPLIERS[reels[0]]
+    if 2 in counts.values():
+        return SLOT_TWO_MATCH_MULTIPLIER
+    return 0.0
 
 
 def make_embed(title: str, description: str, color: discord.Color | None = None) -> discord.Embed:
@@ -1066,6 +1090,7 @@ async def casino_help(ctx: commands.Context) -> None:
                 ".bj [bet] - start blackjack with buttons",
                 ".cf [bet] [heads/tails] - play coinflip",
                 ".dice [bet] [under/over] [target] - play dice",
+                ".slots [bet] - spin a slot machine",
                 ".mines [bet] [mines] - play a 25-square mines game",
                 ".redeem [code] - redeem a promo code",
                 ".dbstatus - developer role only; check Supabase connection",
@@ -1397,6 +1422,45 @@ async def dice_command(ctx: commands.Context, requested_bet: int, direction: str
     await ctx.send(embed=make_embed("Dice", "\n".join(line for line in lines if line), color))
 
 
+@bot.command(name="slots", aliases=["slot"])
+async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
+    active_game = active_game_name(ctx.author.id)
+    if active_game is not None:
+        await ctx.send(f"Finish your active {active_game} game before starting another game.")
+        return
+
+    balance = balance_for(ctx.author.id)
+    bet, warning = normalized_bet(balance, requested_bet)
+    if bet is None:
+        await ctx.send(warning)
+        return
+
+    reels = spin_slots()
+    base_multiplier = slots_multiplier(reels)
+    multiplier = round(base_multiplier * bet_return_rate(bet), 4)
+    payout = round(bet * multiplier, 2)
+
+    balance = round(balance - bet + payout, 2)
+    set_balance(ctx.author.id, balance)
+
+    if payout > 0:
+        profit = round(payout - bet, 2)
+        outcome = f"You win ${money(payout)}. Profit: ${money(profit)}."
+        color = discord.Color.green()
+    else:
+        outcome = f"No match. You lose ${money(bet)}."
+        color = discord.Color.red()
+
+    lines = [
+        warning,
+        f"[ {' | '.join(reels)} ]",
+        f"Multiplier: {money(multiplier)}x",
+        outcome,
+        f"New balance: ${money(balance)}.",
+    ]
+    await ctx.send(embed=make_embed("Slots", "\n".join(line for line in lines if line), color))
+
+
 @bot.command(name="mines")
 async def mines_command(ctx: commands.Context, requested_bet: int, mine_count: int) -> None:
     active_game = active_game_name(ctx.author.id)
@@ -1501,6 +1565,8 @@ def command_usage(command_name: str | None) -> str | None:
         "mines": ".mines bet mines",
         "cf": ".cf bet heads",
         "dice": ".dice bet under target",
+        "slots": ".slots bet",
+        "slot": ".slots bet",
         "bj": ".bj bet",
         "testhand": ".testhand A K",
     }
