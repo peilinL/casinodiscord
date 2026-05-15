@@ -78,7 +78,13 @@ def start_render_health_server() -> None:
 STARTING_BALANCE = 250
 COMMAND_PREFIX = "."
 DEVELOPER_ROLE_NAME = "developer"
+VIP_ROLE_NAME = os.getenv("VIP_ROLE_NAME", "VIP")
 COINFLIP_WIN_RATE = 0.50
+VIP_COINFLIP_WIN_BONUS = 0.05
+VIP_DICE_WIN_CHANCE_BONUS = 5.0
+VIP_SLOT_RESPIN_CHANCE = 0.25
+VIP_BLACKJACK_SAFE_DRAW_CHANCE = 0.50
+VIP_MINES_SAVE_CHANCE = 0.25
 HIGH_BET_THRESHOLD = 1000
 LOW_BET_RETURN = 0.925
 HIGH_BET_RETURN = 0.85
@@ -405,8 +411,29 @@ def parse_cards(labels: tuple[str, ...]) -> list[int] | None:
     return cards
 
 
+def draw_card_for_hand(cards: list[int], vip: bool = False) -> int:
+    card = draw_card()
+    if not vip or hand_value(cards + [card]) <= 21:
+        return card
+
+    if random.random() >= VIP_BLACKJACK_SAFE_DRAW_CHANCE:
+        return card
+
+    safe_cards = [candidate for candidate in range(len(CARD_VALUES)) if hand_value(cards + [candidate]) <= 21]
+    if not safe_cards:
+        return card
+    return random.choice(safe_cards)
+
+
 def spin_slots() -> list[str]:
     return random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
+
+
+def spin_slots_for_player(vip: bool = False) -> tuple[list[str], bool]:
+    reels = spin_slots()
+    if vip and slots_multiplier(reels) == 0 and random.random() < VIP_SLOT_RESPIN_CHANCE:
+        return spin_slots(), True
+    return reels, False
 
 
 def slots_multiplier(reels: list[str]) -> float:
@@ -458,10 +485,18 @@ def active_game_name(user_id: int) -> str | None:
     return None
 
 
-def has_developer_role(member: discord.abc.User) -> bool:
+def has_role_named(member: discord.abc.User, role_name: str) -> bool:
     return isinstance(member, discord.Member) and any(
-        role.name.casefold().strip() == DEVELOPER_ROLE_NAME for role in member.roles
+        role.name.casefold().strip() == role_name.casefold().strip() for role in member.roles
     )
+
+
+def has_developer_role(member: discord.abc.User) -> bool:
+    return has_role_named(member, DEVELOPER_ROLE_NAME)
+
+
+def has_vip_role(member: discord.abc.User) -> bool:
+    return has_role_named(member, VIP_ROLE_NAME)
 
 
 def developer_only() -> commands.Check:
@@ -503,6 +538,7 @@ class BlackjackGame:
     user_id: int
     bet: int
     balance: float
+    vip: bool = False
     player_cards: list[int] = field(default_factory=list)
     dealer_cards: list[int] = field(default_factory=list)
     first_turn: bool = True
@@ -515,8 +551,8 @@ class BlackjackGame:
     stood_hands: set[int] = field(default_factory=set)
 
     @classmethod
-    def start(cls, user_id: int, balance: float, bet: int) -> "BlackjackGame":
-        game = cls(user_id=user_id, bet=bet, balance=round(balance - bet, 2))
+    def start(cls, user_id: int, balance: float, bet: int, vip: bool = False) -> "BlackjackGame":
+        game = cls(user_id=user_id, bet=bet, balance=round(balance - bet, 2), vip=vip)
         game.player_cards = [draw_card(), draw_card()]
         game.dealer_cards = [draw_card()]
         return game
@@ -544,7 +580,7 @@ class BlackjackGame:
 
         if self.split_hands is not None:
             hand = self.split_hands[self.active_hand]
-            hand.append(draw_card())
+            hand.append(draw_card_for_hand(hand, self.vip))
             total = hand_value(hand)
             if total > 21:
                 self.busted_hands.add(self.active_hand)
@@ -553,7 +589,7 @@ class BlackjackGame:
             return f"Hand {self.active_hand + 1} hit."
 
         self.first_turn = False
-        self.player_cards.append(draw_card())
+        self.player_cards.append(draw_card_for_hand(self.player_cards, self.vip))
         if hand_value(self.player_cards) > 21:
             self.finished = True
             self.result = "Bust! You lose."
@@ -583,7 +619,7 @@ class BlackjackGame:
         self.first_turn = False
         self.balance = round(self.balance - self.bet, 2)
         self.bet *= 2
-        self.player_cards.append(draw_card())
+        self.player_cards.append(draw_card_for_hand(self.player_cards, self.vip))
 
         if hand_value(self.player_cards) > 21:
             self.finished = True
@@ -605,8 +641,8 @@ class BlackjackGame:
         self.first_turn = False
         self.balance = round(self.balance - self.bet, 2)
         self.split_hands = [
-            [self.player_cards[0], draw_card()],
-            [self.player_cards[1], draw_card()],
+            [self.player_cards[0], draw_card_for_hand([self.player_cards[0]], self.vip)],
+            [self.player_cards[1], draw_card_for_hand([self.player_cards[1]], self.vip)],
         ]
         self.split_bets = [self.bet, self.bet]
         self.active_hand = 0
@@ -821,12 +857,13 @@ class MinesGame:
     mine_count: int
     balance: float
     mines: set[int]
+    vip: bool = False
     revealed_safe: set[int] = field(default_factory=set)
     finished: bool = False
     result: str = ""
 
     @classmethod
-    def start(cls, user_id: int, balance: float, bet: int, mine_count: int) -> "MinesGame":
+    def start(cls, user_id: int, balance: float, bet: int, mine_count: int, vip: bool = False) -> "MinesGame":
         mines = set(random.sample(range(MINES_GRID_SIZE), mine_count))
         return cls(
             user_id=user_id,
@@ -834,6 +871,7 @@ class MinesGame:
             mine_count=mine_count,
             balance=round(balance - bet, 2),
             mines=mines,
+            vip=vip,
         )
 
     @property
@@ -846,23 +884,44 @@ class MinesGame:
     def current_payout(self) -> float:
         return round(self.bet * self.current_multiplier(), 2)
 
+    def vip_saved_from_mine(self, index: int) -> bool:
+        if not self.vip or random.random() >= VIP_MINES_SAVE_CHANCE:
+            return False
+
+        replacement_options = [
+            square
+            for square in range(MINES_GRID_SIZE)
+            if square != index and square not in self.mines and square not in self.revealed_safe
+        ]
+        if not replacement_options:
+            return False
+
+        self.mines.remove(index)
+        self.mines.add(random.choice(replacement_options))
+        return True
+
     def reveal(self, index: int) -> str:
         if self.finished:
             return "This mines game is already over."
         if index in self.revealed_safe:
             return "That square is already revealed."
+        vip_saved = False
         if index in self.mines:
-            self.finished = True
-            self.result = f"Square {index + 1} had a mine. You lose ${money(self.bet)}."
-            return self.result
+            if self.vip_saved_from_mine(index):
+                vip_saved = True
+            else:
+                self.finished = True
+                self.result = f"Square {index + 1} had a mine. You lose ${money(self.bet)}."
+                return self.result
 
         self.revealed_safe.add(index)
+        vip_notice = "VIP luck saved that pick. " if vip_saved else ""
         if len(self.revealed_safe) >= self.safe_total:
-            return self.cash_out(f"Square {index + 1} was safe. All safe squares revealed.")
+            return self.cash_out(f"{vip_notice}Square {index + 1} was safe. All safe squares revealed.")
 
         payout = self.current_payout()
         multiplier = self.current_multiplier()
-        return f"Square {index + 1} was safe. Current cashout: ${money(payout)} ({money(multiplier)}x)."
+        return f"{vip_notice}Square {index + 1} was safe. Current cashout: ${money(payout)} ({money(multiplier)}x)."
 
     def cash_out(self, prefix: str | None = None) -> str:
         if self.finished:
@@ -1118,6 +1177,11 @@ async def casino_help(ctx: commands.Context) -> None:
         inline=False,
     )
     embed.add_field(
+        name="VIP",
+        value="VIP luck applies automatically in games. VIP members can only tip other VIP members.",
+        inline=False,
+    )
+    embed.add_field(
         name="Developer",
         value="\n".join(
             [
@@ -1226,6 +1290,10 @@ async def tip_command(ctx: commands.Context, target: discord.Member, amount: int
 
     if target.id == ctx.author.id:
         await ctx.send("You cannot tip yourself.")
+        return
+
+    if has_vip_role(ctx.author) and not has_vip_role(target):
+        await ctx.send("VIP members can only tip other VIP members.")
         return
 
     sender_active_game = active_game_name(ctx.author.id)
@@ -1375,8 +1443,10 @@ async def coinflip_command(ctx: commands.Context, requested_bet: int, side: str)
         await ctx.send(warning)
         return
 
+    is_vip = has_vip_role(ctx.author)
+    win_rate = min(0.99, COINFLIP_WIN_RATE + (VIP_COINFLIP_WIN_BONUS if is_vip else 0))
     balance = round(balance - bet, 2)
-    won = random.random() < COINFLIP_WIN_RATE
+    won = random.random() < win_rate
     if won:
         result = side
     else:
@@ -1392,7 +1462,8 @@ async def coinflip_command(ctx: commands.Context, requested_bet: int, side: str)
         color = discord.Color.red()
 
     set_balance(ctx.author.id, balance)
-    description = f"{warning + chr(10) if warning else ''}{outcome}\nNew balance: ${money(balance)}."
+    vip_line = f"VIP win chance: {money(win_rate * 100)}%.\n" if is_vip else ""
+    description = f"{warning + chr(10) if warning else ''}{vip_line}{outcome}\nNew balance: ${money(balance)}."
     await ctx.send(embed=make_embed("Coinflip", description, color))
 
 
@@ -1423,9 +1494,18 @@ async def dice_command(ctx: commands.Context, requested_bet: int, direction: str
         await ctx.send(warning)
         return
 
+    is_vip = has_vip_role(ctx.author)
+    effective_target = target
+    if is_vip:
+        if direction == "under":
+            effective_target = min(99.0, target + VIP_DICE_WIN_CHANCE_BONUS)
+        else:
+            effective_target = max(1.0, target - VIP_DICE_WIN_CHANCE_BONUS)
+    effective_win_chance = effective_target if direction == "under" else 100 - effective_target
+
     multiplier = 100 * bet_return_rate(bet) / win_chance
     roll = random.randint(0, 9999) / 100
-    won = roll < target if direction == "under" else roll > target
+    won = roll < effective_target if direction == "under" else roll > effective_target
 
     balance = round(balance - bet, 2)
     payout = round(bet * multiplier, 2)
@@ -1445,6 +1525,7 @@ async def dice_command(ctx: commands.Context, requested_bet: int, direction: str
         f"Dice roll: {money(roll)}",
         f"Mode: roll {direction} {money(target)}",
         f"Win chance: {money(win_chance)}%",
+        f"VIP win chance: {money(effective_win_chance)}%" if is_vip else None,
         f"Multiplier: {money(multiplier)}x",
         outcome,
         f"New balance: ${money(balance)}.",
@@ -1465,7 +1546,8 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
         await ctx.send(warning)
         return
 
-    reels = spin_slots()
+    is_vip = has_vip_role(ctx.author)
+    reels, vip_respin = spin_slots_for_player(is_vip)
     base_multiplier = slots_multiplier(reels)
     multiplier = round(base_multiplier * bet_return_rate(bet) * SLOT_RETURN_MULTIPLIER, 4)
     payout = round(bet * multiplier, 2)
@@ -1484,6 +1566,7 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
     lines = [
         warning,
         f"[ {slots_display(reels)} ]",
+        "VIP respin used." if vip_respin else None,
         f"Multiplier: {money(multiplier)}x",
         outcome,
         f"New balance: ${money(balance)}.",
@@ -1508,13 +1591,15 @@ async def mines_command(ctx: commands.Context, requested_bet: int, mine_count: i
         await ctx.send(warning)
         return
 
-    game = MinesGame.start(ctx.author.id, balance, bet, mine_count)
+    is_vip = has_vip_role(ctx.author)
+    game = MinesGame.start(ctx.author.id, balance, bet, mine_count, is_vip)
     set_balance(ctx.author.id, game.balance)
     active_mines_games[ctx.author.id] = game
 
     session = MinesSession(game)
     active_mines_sessions[ctx.author.id] = session
-    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}."
+    vip_notice = " VIP luck active." if is_vip else ""
+    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}.{vip_notice}"
     session.board_message = await ctx.send(embed=mines_embed(game, notice), view=session.board_view)
     session.control_message = await ctx.send(embed=mines_control_embed(game), view=session.control_view)
 
@@ -1571,13 +1656,15 @@ async def blackjack_command(ctx: commands.Context, requested_bet: int) -> None:
         await ctx.send(warning)
         return
 
-    game = BlackjackGame.start(ctx.author.id, balance, bet)
+    is_vip = has_vip_role(ctx.author)
+    game = BlackjackGame.start(ctx.author.id, balance, bet, is_vip)
     set_balance(ctx.author.id, game.balance)
     active_blackjack_games[ctx.author.id] = game
 
     view = BlackjackView(game)
     active_blackjack_views[ctx.author.id] = view
-    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}."
+    vip_notice = " VIP luck active." if is_vip else ""
+    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}.{vip_notice}"
     view.message = await ctx.send(embed=blackjack_embed(game, notice), view=view)
 
 
