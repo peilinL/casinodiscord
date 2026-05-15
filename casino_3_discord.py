@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
@@ -83,6 +84,9 @@ HIGH_BET_THRESHOLD = 1000
 LOW_BET_RETURN = 0.925
 HIGH_BET_RETURN = 0.85
 MINES_GRID_SIZE = 25
+PLINKO_ROWS = 8
+PLINKO_BASE_MULTIPLIERS = [8.0, 3.0, 1.5, 0.7, 0.3, 0.7, 1.5, 3.0, 8.0]
+PLINKO_ANIMATION_DELAY = 0.35
 SLOT_SYMBOLS = ["7", "BAR", "Bell", "Cherry", "Lemon", "Diamond"]
 SLOT_WEIGHTS = [1, 2, 4, 6, 8, 10]
 SLOT_EMOJIS = {
@@ -140,6 +144,8 @@ active_blackjack_games: dict[int, "BlackjackGame"] = {}
 active_blackjack_views: dict[int, "BlackjackView"] = {}
 active_mines_games: dict[int, "MinesGame"] = {}
 active_mines_sessions: dict[int, "MinesSession"] = {}
+active_plinko_games: dict[int, "PlinkoGame"] = {}
+active_plinko_sessions: dict[int, "PlinkoSession"] = {}
 promo_codes: dict[str, "PromoCode"] = {}
 
 
@@ -373,6 +379,35 @@ def mines_multiplier(mine_count: int, revealed_safe: int, bet: int) -> float:
     return round(fair_multiplier * bet_return_rate(bet), 4)
 
 
+def plinko_path() -> list[int]:
+    positions = [0]
+    position = 0
+    for _ in range(PLINKO_ROWS):
+        position += random.randint(0, 1)
+        positions.append(position)
+    return positions
+
+
+def plinko_multiplier(bucket: int, bet: int) -> float:
+    return round(PLINKO_BASE_MULTIPLIERS[bucket] * bet_return_rate(bet), 4)
+
+
+def plinko_board(path: list[int], bet: int, current_row: int | None = None) -> str:
+    lines = []
+    visible_row = 0 if current_row is None else min(current_row, PLINKO_ROWS)
+
+    for row in range(PLINKO_ROWS + 1):
+        indent = " " * (PLINKO_ROWS - row)
+        cells = []
+        for column in range(row + 1):
+            cells.append("🔴" if row == visible_row and column == path[visible_row] else "⚪")
+        lines.append(f"{indent}{' '.join(cells)}")
+
+    bucket_labels = " ".join(f"{plinko_multiplier(index, bet):g}x" for index in range(PLINKO_ROWS + 1))
+    lines.append(bucket_labels)
+    return "\n".join(lines)
+
+
 def draw_card() -> int:
     return random.randint(0, 12)
 
@@ -455,6 +490,8 @@ def active_game_name(user_id: int) -> str | None:
         return "blackjack"
     if user_id in active_mines_games:
         return "mines"
+    if user_id in active_plinko_games:
+        return "plinko"
     return None
 
 
@@ -1061,6 +1098,157 @@ class MinesControlView(discord.ui.View):
         await self.session.cash_out(interaction)
 
 
+@dataclass
+class PlinkoGame:
+    user_id: int
+    bet: int
+    balance: float
+    path: list[int]
+    landed: bool = False
+    finished: bool = False
+    bucket: int | None = None
+    multiplier: float = 0.0
+    payout: float = 0.0
+    result: str = ""
+
+    @classmethod
+    def start(cls, user_id: int, balance: float, bet: int) -> "PlinkoGame":
+        return cls(user_id=user_id, bet=bet, balance=round(balance - bet, 2), path=plinko_path())
+
+    def land(self) -> str:
+        if self.landed:
+            return self.result
+
+        self.bucket = self.path[-1]
+        self.multiplier = plinko_multiplier(self.bucket, self.bet)
+        self.payout = round(self.bet * self.multiplier, 2)
+        self.landed = True
+        self.result = f"Landed in bucket {self.bucket + 1}. Cash out for ${money(self.payout)} ({money(self.multiplier)}x)."
+        return self.result
+
+    def cash_out(self) -> str:
+        if self.finished:
+            return "This plinko game is already over."
+        if not self.landed:
+            return "The ball is still dropping."
+
+        self.balance = round(self.balance + self.payout, 2)
+        self.finished = True
+        profit = round(self.payout - self.bet, 2)
+        self.result = f"Cashed out for ${money(self.payout)}. Profit: ${money(profit)}."
+        return self.result
+
+
+def plinko_embed(game: PlinkoGame, current_row: int | None = None, notice: str | None = None) -> discord.Embed:
+    description = notice or game.result or "Dropping..."
+    if game.finished:
+        color = discord.Color.green() if game.payout >= game.bet else discord.Color.red()
+    elif game.landed:
+        color = discord.Color.gold()
+    else:
+        color = discord.Color.blurple()
+
+    board = plinko_board(game.path, game.bet, current_row)
+    embed = make_embed("Plinko", f"{description}\n```text\n{board}\n```", color)
+    embed.add_field(name="Bet", value=f"${money(game.bet)}", inline=True)
+
+    if game.landed:
+        embed.add_field(name="Multiplier", value=f"{money(game.multiplier)}x", inline=True)
+        embed.add_field(name="Payout", value=f"${money(game.payout)}", inline=True)
+    else:
+        embed.add_field(name="Multiplier", value="Dropping", inline=True)
+        embed.add_field(name="Payout", value="Dropping", inline=True)
+
+    embed.add_field(name="Balance", value=f"${money(game.balance)}", inline=True)
+    return embed
+
+
+class PlinkoSession:
+    def __init__(self, game: PlinkoGame) -> None:
+        self.game = game
+        self.message: discord.Message | None = None
+        self.view = PlinkoView(self)
+
+    async def animate(self) -> None:
+        if self.message is None:
+            return
+
+        for row in range(PLINKO_ROWS + 1):
+            await self.message.edit(embed=plinko_embed(self.game, row), view=self.view)
+            await asyncio.sleep(PLINKO_ANIMATION_DELAY)
+
+        notice = self.game.land()
+        self.view.refresh_buttons()
+        await self.message.edit(embed=plinko_embed(self.game, PLINKO_ROWS, notice), view=self.view)
+
+    async def cash_out(self, interaction: discord.Interaction) -> None:
+        previous_balance = self.game.balance
+        previous_finished = self.game.finished
+        previous_result = self.game.result
+        notice = self.game.cash_out()
+        if self.game.finished:
+            try:
+                set_balance(self.game.user_id, self.game.balance)
+            except BalanceStorageError as error:
+                self.game.balance = previous_balance
+                self.game.finished = previous_finished
+                self.game.result = previous_result
+                await interaction.response.send_message(str(error), ephemeral=True)
+                return
+
+            active_plinko_games.pop(self.game.user_id, None)
+            active_plinko_sessions.pop(self.game.user_id, None)
+            self.view.disable_buttons()
+            self.view.stop()
+
+        await interaction.response.edit_message(embed=plinko_embed(self.game, PLINKO_ROWS, notice), view=self.view)
+
+    async def expire(self) -> None:
+        if self.game.finished:
+            return
+
+        self.game.finished = True
+        self.game.result = "Game timed out. Plinko payout was forfeited."
+        active_plinko_games.pop(self.game.user_id, None)
+        active_plinko_sessions.pop(self.game.user_id, None)
+        self.view.disable_buttons()
+        self.view.stop()
+
+        if self.message is not None:
+            await self.message.edit(embed=plinko_embed(self.game, PLINKO_ROWS), view=self.view)
+
+
+class PlinkoView(discord.ui.View):
+    def __init__(self, session: PlinkoSession) -> None:
+        super().__init__(timeout=180)
+        self.session = session
+        self.refresh_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.session.game.user_id:
+            return True
+
+        await interaction.response.send_message("Only the player who started this plinko game can cash out.", ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        await self.session.expire()
+
+    def refresh_buttons(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = self.session.game.finished or not self.session.game.landed
+
+    def disable_buttons(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+    @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.success)
+    async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.session.cash_out(interaction)
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -1104,6 +1292,7 @@ async def casino_help(ctx: commands.Context) -> None:
                 ".cf [bet] [heads/tails] - play coinflip",
                 ".dice [bet] [under/over] [target] - play dice",
                 ".slots [bet] - spin a slot machine",
+                ".plinko [bet] - drop a plinko ball",
                 ".mines [bet] [mines] - play a 25-square mines game",
                 ".redeem [code] - redeem a promo code",
                 ".dbstatus - developer role only; check Supabase connection",
@@ -1474,6 +1663,30 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
     await ctx.send(embed=make_embed("Slots", "\n".join(line for line in lines if line), color))
 
 
+@bot.command(name="plinko")
+async def plinko_command(ctx: commands.Context, requested_bet: int) -> None:
+    active_game = active_game_name(ctx.author.id)
+    if active_game is not None:
+        await ctx.send(f"Finish your active {active_game} game before starting plinko.")
+        return
+
+    balance = balance_for(ctx.author.id)
+    bet, warning = normalized_bet(balance, requested_bet)
+    if bet is None:
+        await ctx.send(warning)
+        return
+
+    game = PlinkoGame.start(ctx.author.id, balance, bet)
+    set_balance(ctx.author.id, game.balance)
+    active_plinko_games[ctx.author.id] = game
+
+    session = PlinkoSession(game)
+    active_plinko_sessions[ctx.author.id] = session
+    notice = f"{warning + ' ' if warning else ''}Dropping ${money(bet)}."
+    session.message = await ctx.send(embed=plinko_embed(game, 0, notice), view=session.view)
+    await session.animate()
+
+
 @bot.command(name="mines")
 async def mines_command(ctx: commands.Context, requested_bet: int, mine_count: int) -> None:
     active_game = active_game_name(ctx.author.id)
@@ -1580,6 +1793,7 @@ def command_usage(command_name: str | None) -> str | None:
         "dice": ".dice bet under target",
         "slots": ".slots bet",
         "slot": ".slots bet",
+        "plinko": ".plinko bet",
         "bj": ".bj bet",
         "testhand": ".testhand A K",
     }
