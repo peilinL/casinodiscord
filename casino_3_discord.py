@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import random
@@ -84,9 +83,6 @@ HIGH_BET_THRESHOLD = 1000
 LOW_BET_RETURN = 0.925
 HIGH_BET_RETURN = 0.85
 MINES_GRID_SIZE = 25
-PLINKO_ROWS = 8
-PLINKO_BASE_MULTIPLIERS = [8.0, 3.0, 1.5, 0.7, 0.3, 0.7, 1.5, 3.0, 8.0]
-PLINKO_ANIMATION_DELAY = 0.25
 SLOT_SYMBOLS = ["7", "BAR", "Bell", "Cherry", "Lemon", "Diamond"]
 SLOT_WEIGHTS = [1, 2, 4, 6, 8, 10]
 SLOT_EMOJIS = {
@@ -144,8 +140,6 @@ active_blackjack_games: dict[int, "BlackjackGame"] = {}
 active_blackjack_views: dict[int, "BlackjackView"] = {}
 active_mines_games: dict[int, "MinesGame"] = {}
 active_mines_sessions: dict[int, "MinesSession"] = {}
-active_plinko_games: dict[int, "PlinkoGame"] = {}
-active_plinko_sessions: dict[int, "PlinkoSession"] = {}
 promo_codes: dict[str, "PromoCode"] = {}
 
 
@@ -379,41 +373,6 @@ def mines_multiplier(mine_count: int, revealed_safe: int, bet: int) -> float:
     return round(fair_multiplier * bet_return_rate(bet), 4)
 
 
-def plinko_path() -> list[int]:
-    positions = [0]
-    position = 0
-    for _ in range(PLINKO_ROWS):
-        position += random.randint(0, 1)
-        positions.append(position)
-    return positions
-
-
-def plinko_multiplier(bucket: int, bet: int) -> float:
-    return round(PLINKO_BASE_MULTIPLIERS[bucket] * bet_return_rate(bet), 4)
-
-
-def compact_multiplier(multiplier: float) -> str:
-    text = f"{multiplier:.1f}" if multiplier >= 1 else f"{multiplier:.2f}"
-    return text.rstrip("0").rstrip(".")
-
-
-def plinko_board(path: list[int], bet: int, current_row: int | None = None) -> str:
-    lines = []
-    visible_row = min(current_row, PLINKO_ROWS) if current_row is not None else None
-
-    for row in range(PLINKO_ROWS + 1):
-        indent = " " * (PLINKO_ROWS - row)
-        cells = []
-        for column in range(row + 1):
-            has_ball = visible_row is not None and row == visible_row and column == path[visible_row]
-            cells.append("🔴" if has_ball else "⚪")
-        lines.append(f"{indent}{' '.join(cells)}")
-
-    bucket_labels = " ".join(f"{compact_multiplier(plinko_multiplier(index, bet)):>3}" for index in range(PLINKO_ROWS + 1))
-    lines.append(bucket_labels)
-    return "\n".join(lines)
-
-
 def draw_card() -> int:
     return random.randint(0, 12)
 
@@ -496,8 +455,6 @@ def active_game_name(user_id: int) -> str | None:
         return "blackjack"
     if user_id in active_mines_games:
         return "mines"
-    if user_id in active_plinko_games:
-        return "plinko"
     return None
 
 
@@ -1103,253 +1060,6 @@ class MinesControlView(discord.ui.View):
     async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.session.cash_out(interaction)
 
-
-@dataclass
-class PlinkoGame:
-    user_id: int
-    bet: int
-    balance: float
-    current_path: list[int] = field(default_factory=plinko_path)
-    banked_payout: float = 0.0
-    balls_dropped: int = 0
-    animating: bool = False
-    finished: bool = False
-    last_bucket: int | None = None
-    last_multiplier: float = 0.0
-    last_payout: float = 0.0
-    result: str = ""
-
-    @classmethod
-    def start(cls, user_id: int, balance: float, bet: int) -> "PlinkoGame":
-        return cls(user_id=user_id, bet=bet, balance=round(balance, 2))
-
-    def can_add_ball(self) -> bool:
-        return not self.finished and not self.animating and self.balance >= self.bet
-
-    def can_cash_out(self) -> bool:
-        return not self.finished and not self.animating and self.banked_payout > 0
-
-    def start_ball(self) -> str:
-        if self.finished:
-            return "This plinko game is already over."
-        if self.animating:
-            return "The current ball is still dropping."
-        if self.balance < self.bet:
-            return "Insufficient balance to add another ball."
-
-        self.balance = round(self.balance - self.bet, 2)
-        self.current_path = plinko_path()
-        self.animating = True
-        self.result = f"Dropping ball {self.balls_dropped + 1}."
-        return self.result
-
-    def land_ball(self) -> str:
-        if not self.animating:
-            return self.result or "No ball is dropping."
-
-        self.last_bucket = self.current_path[-1]
-        self.last_multiplier = plinko_multiplier(self.last_bucket, self.bet)
-        self.last_payout = round(self.bet * self.last_multiplier, 2)
-        self.banked_payout = round(self.banked_payout + self.last_payout, 2)
-        self.balls_dropped += 1
-        self.animating = False
-        self.result = (
-            f"Ball {self.balls_dropped} landed in bucket {self.last_bucket + 1}: "
-            f"${money(self.last_payout)} ({money(self.last_multiplier)}x)."
-        )
-        return self.result
-
-    def cash_out(self) -> str:
-        if self.finished:
-            return "This plinko game is already over."
-        if self.animating:
-            return "The ball is still dropping."
-        if self.banked_payout <= 0:
-            return "Drop at least one ball before cashing out."
-
-        payout = self.banked_payout
-        self.balance = round(self.balance + payout, 2)
-        self.finished = True
-        profit = round(payout - (self.bet * self.balls_dropped), 2)
-        self.result = f"Cashed out for ${money(payout)} after {self.balls_dropped} ball{'s' if self.balls_dropped != 1 else ''}. Profit: ${money(profit)}."
-        return self.result
-
-
-def plinko_embed(game: PlinkoGame, current_row: int | None = None, notice: str | None = None) -> discord.Embed:
-    description = notice or game.result or f"Press Add Ball to drop a ${money(game.bet)} ball."
-    if game.finished:
-        color = discord.Color.green() if game.banked_payout >= game.bet * max(1, game.balls_dropped) else discord.Color.red()
-    elif game.animating:
-        color = discord.Color.blurple()
-    elif game.banked_payout > 0:
-        color = discord.Color.gold()
-    else:
-        color = discord.Color.blurple()
-
-    board = plinko_board(game.current_path, game.bet, current_row)
-    embed = make_embed("Plinko", f"{description}\n```text\n{board}\n```", color)
-    embed.add_field(name="Bet / Ball", value=f"${money(game.bet)}", inline=True)
-    embed.add_field(name="Balls", value=str(game.balls_dropped), inline=True)
-    embed.add_field(name="Banked", value=f"${money(game.banked_payout)}", inline=True)
-
-    if game.balls_dropped:
-        embed.add_field(name="Last Hit", value=f"${money(game.last_payout)} ({money(game.last_multiplier)}x)", inline=True)
-    elif game.animating:
-        embed.add_field(name="Last Hit", value="Dropping", inline=True)
-    else:
-        embed.add_field(name="Last Hit", value="None", inline=True)
-
-    add_ball_state = "Ready" if game.can_add_ball() else "Unavailable"
-    cashout_state = "Ready" if game.can_cash_out() else "Unavailable"
-    embed.add_field(name="Add Ball", value=add_ball_state, inline=True)
-    embed.add_field(name="Cash Out", value=cashout_state, inline=True)
-    embed.add_field(name="Balance", value=f"${money(game.balance)}", inline=True)
-    return embed
-
-
-class PlinkoSession:
-    def __init__(self, game: PlinkoGame) -> None:
-        self.game = game
-        self.message: discord.Message | None = None
-        self.view = PlinkoView(self)
-
-    async def add_ball(self, interaction: discord.Interaction) -> None:
-        if self.game.finished:
-            await interaction.response.send_message("This plinko game is already over.", ephemeral=True)
-            return
-        if self.game.animating:
-            await interaction.response.send_message("The current ball is still dropping.", ephemeral=True)
-            return
-        if self.game.balance < self.game.bet:
-            await interaction.response.send_message("Insufficient balance to add another ball.", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
-        previous_balance = self.game.balance
-        previous_path = self.game.current_path[:]
-        previous_animating = self.game.animating
-        previous_result = self.game.result
-
-        notice = self.game.start_ball()
-        try:
-            set_balance(self.game.user_id, self.game.balance)
-        except BalanceStorageError as error:
-            self.game.balance = previous_balance
-            self.game.current_path = previous_path
-            self.game.animating = previous_animating
-            self.game.result = previous_result
-            await interaction.followup.send(str(error), ephemeral=True)
-            return
-
-        self.view.refresh_buttons()
-        await self.animate(notice)
-
-    async def animate(self, notice: str | None = None) -> None:
-        if self.message is None:
-            return
-
-        for row in range(PLINKO_ROWS + 1):
-            await self.message.edit(embed=plinko_embed(self.game, row, notice), view=self.view)
-            if row < PLINKO_ROWS:
-                await asyncio.sleep(PLINKO_ANIMATION_DELAY)
-
-        notice = self.game.land_ball()
-        self.view.refresh_buttons()
-        await self.message.edit(embed=plinko_embed(self.game, None, notice), view=self.view)
-
-    async def cash_out(self, interaction: discord.Interaction) -> None:
-        if self.game.finished:
-            await interaction.response.send_message("This plinko game is already over.", ephemeral=True)
-            return
-        if self.game.animating:
-            await interaction.response.send_message("The ball is still dropping.", ephemeral=True)
-            return
-        if self.game.banked_payout <= 0:
-            await interaction.response.send_message("Drop at least one ball before cashing out.", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
-        previous_balance = self.game.balance
-        previous_finished = self.game.finished
-        previous_result = self.game.result
-        notice = self.game.cash_out()
-        if self.game.finished:
-            try:
-                set_balance(self.game.user_id, self.game.balance)
-            except BalanceStorageError as error:
-                self.game.balance = previous_balance
-                self.game.finished = previous_finished
-                self.game.result = previous_result
-                await interaction.followup.send(str(error), ephemeral=True)
-                return
-
-            active_plinko_games.pop(self.game.user_id, None)
-            active_plinko_sessions.pop(self.game.user_id, None)
-            self.view.disable_buttons()
-            self.view.stop()
-
-        if self.message is not None:
-            await self.message.edit(embed=plinko_embed(self.game, None, notice), view=self.view)
-
-    async def expire(self) -> None:
-        if self.game.finished:
-            return
-
-        self.game.finished = True
-        if self.game.balls_dropped:
-            self.game.result = "Game timed out. Banked plinko payout was forfeited."
-        else:
-            self.game.result = "Plinko session closed."
-        active_plinko_games.pop(self.game.user_id, None)
-        active_plinko_sessions.pop(self.game.user_id, None)
-        self.view.disable_buttons()
-        self.view.stop()
-
-        if self.message is not None:
-            await self.message.edit(embed=plinko_embed(self.game, None), view=self.view)
-
-
-class PlinkoView(discord.ui.View):
-    def __init__(self, session: PlinkoSession) -> None:
-        super().__init__(timeout=180)
-        self.session = session
-        self.refresh_buttons()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.session.game.user_id:
-            return True
-
-        await interaction.response.send_message("Only the player who started this plinko game can cash out.", ephemeral=True)
-        return False
-
-    async def on_timeout(self) -> None:
-        await self.session.expire()
-
-    def refresh_buttons(self) -> None:
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                if item.label and item.label.startswith("Add Ball"):
-                    item.label = f"Add Ball (${money(self.session.game.bet)})"
-                    item.disabled = not self.session.game.can_add_ball()
-                elif item.label == "Cash Out":
-                    item.disabled = not self.session.game.can_cash_out()
-
-    def disable_buttons(self) -> None:
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-
-    @discord.ui.button(label="Add Ball", style=discord.ButtonStyle.primary)
-    async def add_ball_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.session.add_ball(interaction)
-
-    @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.success)
-    async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.session.cash_out(interaction)
-
-
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -1402,7 +1112,6 @@ async def casino_help(ctx: commands.Context) -> None:
                 ".cf [bet] [heads/tails] - play coinflip",
                 ".dice [bet] [under/over] [target] - play dice",
                 ".slots [bet] - spin a slot machine",
-                ".plinko [bet] - drop a plinko ball",
                 ".mines [bet] [mines] - play a 25-square mines game",
             ]
         ),
@@ -1782,28 +1491,6 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
     await ctx.send(embed=make_embed("Slots", "\n".join(line for line in lines if line), color))
 
 
-@bot.command(name="plinko")
-async def plinko_command(ctx: commands.Context, requested_bet: int) -> None:
-    active_game = active_game_name(ctx.author.id)
-    if active_game is not None:
-        await ctx.send(f"Finish your active {active_game} game before starting plinko.")
-        return
-
-    balance = balance_for(ctx.author.id)
-    bet, warning = normalized_bet(balance, requested_bet)
-    if bet is None:
-        await ctx.send(warning)
-        return
-
-    game = PlinkoGame.start(ctx.author.id, balance, bet)
-    active_plinko_games[ctx.author.id] = game
-
-    session = PlinkoSession(game)
-    active_plinko_sessions[ctx.author.id] = session
-    notice = f"{warning + ' ' if warning else ''}Plinko started. Press Add Ball to drop a ${money(bet)} ball."
-    session.message = await ctx.send(embed=plinko_embed(game, None, notice), view=session.view)
-
-
 @bot.command(name="mines")
 async def mines_command(ctx: commands.Context, requested_bet: int, mine_count: int) -> None:
     active_game = active_game_name(ctx.author.id)
@@ -1910,7 +1597,6 @@ def command_usage(command_name: str | None) -> str | None:
         "dice": ".dice bet under target",
         "slots": ".slots bet",
         "slot": ".slots bet",
-        "plinko": ".plinko bet",
         "bj": ".bj bet",
         "testhand": ".testhand A K",
     }
