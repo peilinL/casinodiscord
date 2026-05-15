@@ -84,16 +84,25 @@ LOW_BET_RETURN = 0.925
 HIGH_BET_RETURN = 0.85
 MINES_GRID_SIZE = 25
 SLOT_SYMBOLS = ["7", "BAR", "Bell", "Cherry", "Lemon", "Diamond"]
-SLOT_WEIGHTS = [1, 2, 3, 5, 6, 8]
-SLOT_THREE_MATCH_MULTIPLIERS = {
-    "7": 12,
-    "BAR": 8,
-    "Diamond": 6,
-    "Bell": 5,
-    "Cherry": 4,
-    "Lemon": 3,
+SLOT_WEIGHTS = [1, 2, 4, 6, 8, 10]
+SLOT_EMOJIS = {
+    "7": "7️⃣",
+    "BAR": "🧱",
+    "Bell": "🔔",
+    "Cherry": "🍒",
+    "Lemon": "🍋",
+    "Diamond": "💎",
 }
-SLOT_TWO_MATCH_MULTIPLIER = 1.25
+SLOT_THREE_MATCH_MULTIPLIERS = {
+    "7": 10,
+    "BAR": 6,
+    "Diamond": 4.5,
+    "Bell": 3.5,
+    "Cherry": 2.75,
+    "Lemon": 2.25,
+}
+SLOT_TWO_MATCH_MULTIPLIER = 0.75
+SLOT_RETURN_MULTIPLIER = 0.85
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
@@ -407,6 +416,10 @@ def slots_multiplier(reels: list[str]) -> float:
     if 2 in counts.values():
         return SLOT_TWO_MATCH_MULTIPLIER
     return 0.0
+
+
+def slots_display(reels: list[str]) -> str:
+    return " | ".join(SLOT_EMOJIS[symbol] for symbol in reels)
 
 
 def make_embed(title: str, description: str, color: discord.Color | None = None) -> discord.Embed:
@@ -1437,7 +1450,7 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
 
     reels = spin_slots()
     base_multiplier = slots_multiplier(reels)
-    multiplier = round(base_multiplier * bet_return_rate(bet), 4)
+    multiplier = round(base_multiplier * bet_return_rate(bet) * SLOT_RETURN_MULTIPLIER, 4)
     payout = round(bet * multiplier, 2)
 
     balance = round(balance - bet + payout, 2)
@@ -1453,7 +1466,7 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
 
     lines = [
         warning,
-        f"[ {' | '.join(reels)} ]",
+        f"[ {slots_display(reels)} ]",
         f"Multiplier: {money(multiplier)}x",
         outcome,
         f"New balance: ${money(balance)}.",
