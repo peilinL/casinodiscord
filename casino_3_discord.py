@@ -86,7 +86,7 @@ HIGH_BET_RETURN = 0.85
 MINES_GRID_SIZE = 25
 PLINKO_ROWS = 8
 PLINKO_BASE_MULTIPLIERS = [8.0, 3.0, 1.5, 0.7, 0.3, 0.7, 1.5, 3.0, 8.0]
-PLINKO_ANIMATION_DELAY = 0.45
+PLINKO_ANIMATION_DELAY = 0.25
 SLOT_SYMBOLS = ["7", "BAR", "Bell", "Cherry", "Lemon", "Diamond"]
 SLOT_WEIGHTS = [1, 2, 4, 6, 8, 10]
 SLOT_EMOJIS = {
@@ -392,6 +392,11 @@ def plinko_multiplier(bucket: int, bet: int) -> float:
     return round(PLINKO_BASE_MULTIPLIERS[bucket] * bet_return_rate(bet), 4)
 
 
+def compact_multiplier(multiplier: float) -> str:
+    text = f"{multiplier:.1f}" if multiplier >= 1 else f"{multiplier:.2f}"
+    return text.rstrip("0").rstrip(".")
+
+
 def plinko_board(path: list[int], bet: int, current_row: int | None = None) -> str:
     lines = []
     visible_row = min(current_row, PLINKO_ROWS) if current_row is not None else None
@@ -404,7 +409,7 @@ def plinko_board(path: list[int], bet: int, current_row: int | None = None) -> s
             cells.append("🔴" if has_ball else "⚪")
         lines.append(f"{indent}{' '.join(cells)}")
 
-    bucket_labels = " ".join(f"{money(plinko_multiplier(index, bet))}x" for index in range(PLINKO_ROWS + 1))
+    bucket_labels = " ".join(f"{compact_multiplier(plinko_multiplier(index, bet)):>3}" for index in range(PLINKO_ROWS + 1))
     lines.append(bucket_labels)
     return "\n".join(lines)
 
@@ -1246,7 +1251,8 @@ class PlinkoSession:
 
         for row in range(PLINKO_ROWS + 1):
             await self.message.edit(embed=plinko_embed(self.game, row, notice), view=self.view)
-            await asyncio.sleep(PLINKO_ANIMATION_DELAY)
+            if row < PLINKO_ROWS:
+                await asyncio.sleep(PLINKO_ANIMATION_DELAY)
 
         notice = self.game.land_ball()
         self.view.refresh_buttons()
