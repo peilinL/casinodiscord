@@ -80,12 +80,11 @@ COMMAND_PREFIX = "."
 DEVELOPER_ROLE_NAME = "developer"
 VIP_ROLE_NAME = os.getenv("VIP_ROLE_NAME", "VIP")
 COINFLIP_WIN_RATE = 0.50
-VIP_COINFLIP_WIN_BONUS = 0.05
+VIP_EXPECTED_RETURN = 1.10
+VIP_COINFLIP_WIN_RATE = 0.55
 VIP_DICE_WIN_CHANCE_BONUS = 5.0
-VIP_SLOT_RESPIN_CHANCE = 0.75
-VIP_SLOT_BONUS_SPINS = 2
-VIP_BLACKJACK_SAFE_DRAW_CHANCE = 0.50
-VIP_MINES_SAVE_CHANCE = 0.25
+VIP_BLACKJACK_SAFE_DRAW_CHANCE = 0.0
+VIP_MINES_SAVE_CHANCE = 0.0
 HIGH_BET_THRESHOLD = 1000
 LOW_BET_RETURN = 0.925
 HIGH_BET_RETURN = 0.85
@@ -100,27 +99,34 @@ SLOT_EMOJIS = {
     "Lemon": "🍋",
     "Diamond": "💎",
 }
-SLOT_THREE_MATCH_MULTIPLIERS = {
-    "7": 10,
-    "BAR": 6,
-    "Diamond": 4.5,
-    "Bell": 3.5,
-    "Cherry": 2.75,
-    "Lemon": 2.25,
-}
-SLOT_TWO_MATCH_MULTIPLIERS = {
-    "7": 1.5,
-    "BAR": 1.2,
-    "Diamond": 1.0,
-    "Bell": 0.85,
-    "Cherry": 0.75,
-    "Lemon": 0.65,
-}
-SLOT_SEVEN_BAR_MIX_MULTIPLIER = 0.45
-SLOT_SEVEN_MIX_MULTIPLIER = 0.35
-SLOT_DIAMOND_BELL_MIX_MULTIPLIER = 0.25
-SLOT_DIAMOND_CHERRY_MIX_MULTIPLIER = 0.20
-SLOT_RETURN_MULTIPLIER = 0.85
+REGULAR_SLOT_MULTIPLIER_WEIGHTS = [
+    (0.00, 5),
+    (0.05, 8),
+    (0.12, 8),
+    (0.25, 8),
+    (0.50, 8),
+    (0.75, 8),
+    (0.90, 8),
+    (0.98, 8),
+    (1.00, 20),
+    (1.10, 12),
+    (1.19, 6),
+    (2.00, 1),
+]
+VIP_SLOT_MULTIPLIER_WEIGHTS = [
+    (0.00, 5),
+    (0.10, 7),
+    (0.25, 7),
+    (0.50, 7),
+    (0.85, 7),
+    (0.98, 7),
+    (1.00, 17),
+    (1.10, 17),
+    (1.19, 15),
+    (2.00, 8),
+    (5.00, 2),
+    (10.00, 1),
+]
 SLOT_LOSS_STREAK_TRIGGER = 3
 SLOT_LOSS_STREAK_GUARANTEE_MULTIPLIER = 1.30
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -176,8 +182,20 @@ def bet_return_rate(bet: int) -> float:
     return LOW_BET_RETURN
 
 
-def even_money_win_return(bet: int) -> float:
-    return 2 * bet_return_rate(bet)
+def bet_return_rate_for_player(bet: int, vip: bool = False) -> float:
+    if vip:
+        return VIP_EXPECTED_RETURN
+    return bet_return_rate(bet)
+
+
+def even_money_win_return(bet: int, vip: bool = False) -> float:
+    return 2 * bet_return_rate_for_player(bet, vip)
+
+
+def coinflip_win_return(bet: int, vip: bool = False) -> float:
+    if vip:
+        return VIP_EXPECTED_RETURN / VIP_COINFLIP_WIN_RATE
+    return even_money_win_return(bet)
 
 
 class BalanceStorageError(RuntimeError):
@@ -560,13 +578,13 @@ def reset_promos() -> None:
     promo_codes.clear()
 
 
-def mines_multiplier(mine_count: int, revealed_safe: int, bet: int) -> float:
+def mines_multiplier(mine_count: int, revealed_safe: int, bet: int, vip: bool = False) -> float:
     if revealed_safe < 1:
         return 1.0
 
     safe_squares = MINES_GRID_SIZE - mine_count
     fair_multiplier = comb(MINES_GRID_SIZE, revealed_safe) / comb(safe_squares, revealed_safe)
-    return round(fair_multiplier * bet_return_rate(bet), 4)
+    return round(fair_multiplier * bet_return_rate_for_player(bet, vip), 4)
 
 
 def draw_card() -> int:
@@ -619,42 +637,11 @@ def spin_slots() -> list[str]:
     return random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
 
 
-def spin_slots_for_player(vip: bool = False) -> list[str]:
-    reels = spin_slots()
-    if not vip or random.random() >= VIP_SLOT_RESPIN_CHANCE:
-        return reels
-
-    best_reels = reels
-    best_multiplier = slots_multiplier(reels)
-    for _ in range(VIP_SLOT_BONUS_SPINS):
-        candidate_reels = spin_slots()
-        candidate_multiplier = slots_multiplier(candidate_reels)
-        if candidate_multiplier > best_multiplier:
-            best_reels = candidate_reels
-            best_multiplier = candidate_multiplier
-
-    return best_reels
-
-
-def slots_multiplier(reels: list[str]) -> float:
-    counts = {symbol: reels.count(symbol) for symbol in set(reels)}
-    if 3 in counts.values():
-        return SLOT_THREE_MATCH_MULTIPLIERS[reels[0]]
-
-    for symbol, count in counts.items():
-        if count == 2:
-            return SLOT_TWO_MATCH_MULTIPLIERS[symbol]
-
-    symbols = set(reels)
-    if "7" in symbols and "BAR" in symbols:
-        return SLOT_SEVEN_BAR_MIX_MULTIPLIER
-    if "7" in symbols:
-        return SLOT_SEVEN_MIX_MULTIPLIER
-    if {"Diamond", "Bell"} <= symbols:
-        return SLOT_DIAMOND_BELL_MIX_MULTIPLIER
-    if {"Diamond", "Cherry"} <= symbols:
-        return SLOT_DIAMOND_CHERRY_MIX_MULTIPLIER
-    return 0.0
+def weighted_slot_multiplier(vip: bool = False) -> float:
+    multiplier_weights = VIP_SLOT_MULTIPLIER_WEIGHTS if vip else REGULAR_SLOT_MULTIPLIER_WEIGHTS
+    multipliers = [multiplier for multiplier, _ in multiplier_weights]
+    weights = [weight for _, weight in multiplier_weights]
+    return random.choices(multipliers, weights=weights, k=1)[0]
 
 
 def slots_display(reels: list[str]) -> str:
@@ -905,12 +892,12 @@ class BlackjackGame:
         dealer_total = hand_value(self.dealer_cards)
 
         if dealer_total > 21:
-            self.balance = round(self.balance + even_money_win_return(self.bet) * self.bet, 2)
+            self.balance = round(self.balance + even_money_win_return(self.bet, self.vip) * self.bet, 2)
             outcome = "Dealer busts. You win."
         elif dealer_total > player_total:
             outcome = "You lost."
         elif dealer_total < player_total:
-            self.balance = round(self.balance + even_money_win_return(self.bet) * self.bet, 2)
+            self.balance = round(self.balance + even_money_win_return(self.bet, self.vip) * self.bet, 2)
             outcome = "You win."
         else:
             self.balance = round(self.balance + self.bet, 2)
@@ -939,12 +926,12 @@ class BlackjackGame:
             if index in self.busted_hands or total > 21:
                 results.append(f"Hand {index + 1} lost.")
             elif dealer_total > 21:
-                self.balance = round(self.balance + even_money_win_return(bet) * bet, 2)
+                self.balance = round(self.balance + even_money_win_return(bet, self.vip) * bet, 2)
                 results.append(f"Dealer busts. Hand {index + 1} wins.")
             elif dealer_total > total:
                 results.append(f"Hand {index + 1} lost.")
             elif dealer_total < total:
-                self.balance = round(self.balance + even_money_win_return(bet) * bet, 2)
+                self.balance = round(self.balance + even_money_win_return(bet, self.vip) * bet, 2)
                 results.append(f"Hand {index + 1} wins.")
             else:
                 self.balance = round(self.balance + bet, 2)
@@ -1105,7 +1092,7 @@ class MinesGame:
         return MINES_GRID_SIZE - self.mine_count
 
     def current_multiplier(self) -> float:
-        return mines_multiplier(self.mine_count, len(self.revealed_safe), self.bet)
+        return mines_multiplier(self.mine_count, len(self.revealed_safe), self.bet, self.vip)
 
     def current_payout(self) -> float:
         return round(self.bet * self.current_multiplier(), 2)
@@ -1721,7 +1708,7 @@ async def coinflip_command(ctx: commands.Context, requested_bet: int, side: str)
         return
 
     is_vip = has_vip_role(ctx.author)
-    win_rate = min(0.99, COINFLIP_WIN_RATE + (VIP_COINFLIP_WIN_BONUS if is_vip else 0))
+    win_rate = VIP_COINFLIP_WIN_RATE if is_vip else COINFLIP_WIN_RATE
     balance = round(balance - bet, 2)
     won = random.random() < win_rate
     if won:
@@ -1730,7 +1717,7 @@ async def coinflip_command(ctx: commands.Context, requested_bet: int, side: str)
         result = "tails" if side == "heads" else "heads"
 
     if won:
-        payout = round(even_money_win_return(bet) * bet, 2)
+        payout = round(coinflip_win_return(bet, is_vip) * bet, 2)
         balance = round(balance + payout, 2)
         outcome = f"{result.title()}! You win."
         color = discord.Color.green()
@@ -1739,8 +1726,7 @@ async def coinflip_command(ctx: commands.Context, requested_bet: int, side: str)
         color = discord.Color.red()
 
     set_balance(ctx.author.id, balance)
-    vip_line = f"VIP win chance: {money(win_rate * 100)}%.\n" if is_vip else ""
-    description = f"{warning + chr(10) if warning else ''}{vip_line}{outcome}\nNew balance: ${money(balance)}."
+    description = f"{warning + chr(10) if warning else ''}{outcome}\nNew balance: ${money(balance)}."
     await ctx.send(embed=make_embed("Coinflip", description, color))
 
 
@@ -1780,7 +1766,8 @@ async def dice_command(ctx: commands.Context, requested_bet: int, direction: str
             effective_target = max(1.0, target - VIP_DICE_WIN_CHANCE_BONUS)
     effective_win_chance = effective_target if direction == "under" else 100 - effective_target
 
-    multiplier = 100 * bet_return_rate(bet) / win_chance
+    payout_win_chance = effective_win_chance if is_vip else win_chance
+    multiplier = 100 * bet_return_rate_for_player(bet, is_vip) / payout_win_chance
     roll = random.randint(0, 9999) / 100
     won = roll < effective_target if direction == "under" else roll > effective_target
 
@@ -1801,8 +1788,7 @@ async def dice_command(ctx: commands.Context, requested_bet: int, direction: str
         warning,
         f"Dice roll: {money(roll)}",
         f"Mode: roll {direction} {money(target)}",
-        f"Win chance: {money(win_chance)}%",
-        f"VIP win chance: {money(effective_win_chance)}%" if is_vip else None,
+        f"Win chance: {money(effective_win_chance if is_vip else win_chance)}%",
         f"Multiplier: {money(multiplier)}x",
         outcome,
         f"New balance: ${money(balance)}.",
@@ -1824,9 +1810,8 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
         return
 
     is_vip = has_vip_role(ctx.author)
-    reels = spin_slots_for_player(is_vip)
-    base_multiplier = slots_multiplier(reels)
-    multiplier = round(base_multiplier * bet_return_rate(bet) * SLOT_RETURN_MULTIPLIER, 4)
+    reels = spin_slots()
+    multiplier = weighted_slot_multiplier(is_vip)
     multiplier = apply_slot_loss_streak_guarantee(ctx.author.id, multiplier)
     payout = round(bet * multiplier, 2)
 
