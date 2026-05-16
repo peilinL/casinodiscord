@@ -1461,10 +1461,11 @@ async def dbstatus_command(ctx: commands.Context) -> None:
         f"SUPABASE_URL set: {'yes' if SUPABASE_URL else 'no'}",
         f"SUPABASE_SERVICE_ROLE_KEY set: {'yes' if SUPABASE_SERVICE_ROLE_KEY else 'no'}",
         f"SUPABASE_ANON_KEY fallback set: {'yes' if SUPABASE_ANON_KEY else 'no'}",
-        f"Balances table: `{SUPABASE_BALANCES_TABLE}`",
-        f"Command guard table: `{SUPABASE_COMMAND_MESSAGES_TABLE}`",
-        f"Promo codes table: `{SUPABASE_PROMO_CODES_TABLE}`",
-        f"Promo redemptions table: `{SUPABASE_PROMO_REDEMPTIONS_TABLE}`",
+        "Tables: "
+        f"balances=`{SUPABASE_BALANCES_TABLE}`, "
+        f"command_guard=`{SUPABASE_COMMAND_MESSAGES_TABLE}`, "
+        f"promo_codes=`{SUPABASE_PROMO_CODES_TABLE}`, "
+        f"promo_redemptions=`{SUPABASE_PROMO_REDEMPTIONS_TABLE}`",
     ]
 
     if supabase_enabled():
@@ -1475,12 +1476,12 @@ async def dbstatus_command(ctx: commands.Context) -> None:
                 query={"select": "user_id,balance", "limit": "1"},
             )
         except HTTPError as error:
-            lines.append(f"Supabase test: failed with {http_error_summary(error)}")
+            lines.append(f"Balances: failed with {http_error_summary(error)}")
         except (URLError, TimeoutError, OSError, ValueError) as error:
-            lines.append(f"Supabase test: failed ({type(error).__name__})")
+            lines.append(f"Balances: failed ({type(error).__name__})")
         else:
             row_count = len(rows) if isinstance(rows, list) else 0
-            lines.append(f"Supabase test: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
+            lines.append(f"Balances: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
 
         try:
             guard_rows = supabase_request(
@@ -1489,12 +1490,12 @@ async def dbstatus_command(ctx: commands.Context) -> None:
                 query={"select": "message_id", "limit": "1"},
             )
         except HTTPError as error:
-            lines.append(f"Command guard table: failed with {http_error_summary(error)}")
+            lines.append(f"Command guard: failed with {http_error_summary(error)}")
         except (URLError, TimeoutError, OSError, ValueError) as error:
-            lines.append(f"Command guard table: failed ({type(error).__name__})")
+            lines.append(f"Command guard: failed ({type(error).__name__})")
         else:
             row_count = len(guard_rows) if isinstance(guard_rows, list) else 0
-            lines.append(f"Command guard table: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
+            lines.append(f"Command guard: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
 
         try:
             promo_rows = supabase_request(
@@ -1503,12 +1504,12 @@ async def dbstatus_command(ctx: commands.Context) -> None:
                 query={"select": "code", "limit": "1"},
             )
         except HTTPError as error:
-            lines.append(f"Promo codes table: failed with {http_error_summary(error)}")
+            lines.append(f"Promo codes: failed with {http_error_summary(error)}")
         except (URLError, TimeoutError, OSError, ValueError) as error:
-            lines.append(f"Promo codes table: failed ({type(error).__name__})")
+            lines.append(f"Promo codes: failed ({type(error).__name__})")
         else:
             row_count = len(promo_rows) if isinstance(promo_rows, list) else 0
-            lines.append(f"Promo codes table: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
+            lines.append(f"Promo codes: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
 
         try:
             redemption_rows = supabase_request(
@@ -1517,12 +1518,12 @@ async def dbstatus_command(ctx: commands.Context) -> None:
                 query={"select": "code", "limit": "1"},
             )
         except HTTPError as error:
-            lines.append(f"Promo redemptions table: failed with {http_error_summary(error)}")
+            lines.append(f"Promo redemptions: failed with {http_error_summary(error)}")
         except (URLError, TimeoutError, OSError, ValueError) as error:
-            lines.append(f"Promo redemptions table: failed ({type(error).__name__})")
+            lines.append(f"Promo redemptions: failed ({type(error).__name__})")
         else:
             row_count = len(redemption_rows) if isinstance(redemption_rows, list) else 0
-            lines.append(f"Promo redemptions table: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
+            lines.append(f"Promo redemptions: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
     else:
         lines.append("Supabase test: skipped because env vars are missing")
 
