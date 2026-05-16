@@ -82,7 +82,8 @@ VIP_ROLE_NAME = os.getenv("VIP_ROLE_NAME", "VIP")
 COINFLIP_WIN_RATE = 0.50
 VIP_COINFLIP_WIN_BONUS = 0.05
 VIP_DICE_WIN_CHANCE_BONUS = 5.0
-VIP_SLOT_RESPIN_CHANCE = 0.25
+VIP_SLOT_RESPIN_CHANCE = 0.75
+VIP_SLOT_BONUS_SPINS = 2
 VIP_BLACKJACK_SAFE_DRAW_CHANCE = 0.50
 VIP_MINES_SAVE_CHANCE = 0.25
 HIGH_BET_THRESHOLD = 1000
@@ -107,14 +108,29 @@ SLOT_THREE_MATCH_MULTIPLIERS = {
     "Cherry": 2.75,
     "Lemon": 2.25,
 }
-SLOT_TWO_MATCH_MULTIPLIER = 0.75
+SLOT_TWO_MATCH_MULTIPLIERS = {
+    "7": 1.5,
+    "BAR": 1.2,
+    "Diamond": 1.0,
+    "Bell": 0.85,
+    "Cherry": 0.75,
+    "Lemon": 0.65,
+}
+SLOT_SEVEN_BAR_MIX_MULTIPLIER = 0.45
+SLOT_SEVEN_MIX_MULTIPLIER = 0.35
+SLOT_DIAMOND_BELL_MIX_MULTIPLIER = 0.25
+SLOT_DIAMOND_CHERRY_MIX_MULTIPLIER = 0.20
 SLOT_RETURN_MULTIPLIER = 0.85
+SLOT_LOSS_STREAK_TRIGGER = 3
+SLOT_LOSS_STREAK_GUARANTEE_MULTIPLIER = 1.30
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
 SUPABASE_BALANCES_TABLE = os.getenv("SUPABASE_BALANCES_TABLE", "player_balances")
 SUPABASE_COMMAND_MESSAGES_TABLE = os.getenv("SUPABASE_COMMAND_MESSAGES_TABLE", "processed_command_messages")
+SUPABASE_PROMO_CODES_TABLE = os.getenv("SUPABASE_PROMO_CODES_TABLE", "promo_codes")
+SUPABASE_PROMO_REDEMPTIONS_TABLE = os.getenv("SUPABASE_PROMO_REDEMPTIONS_TABLE", "promo_redemptions")
 
 CARD_VALUES = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10]
 CARD_LABELS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
@@ -146,6 +162,7 @@ active_blackjack_games: dict[int, "BlackjackGame"] = {}
 active_blackjack_views: dict[int, "BlackjackView"] = {}
 active_mines_games: dict[int, "MinesGame"] = {}
 active_mines_sessions: dict[int, "MinesSession"] = {}
+slot_loss_streaks: dict[int, int] = {}
 promo_codes: dict[str, "PromoCode"] = {}
 
 
@@ -164,6 +181,10 @@ def even_money_win_return(bet: int) -> float:
 
 
 class BalanceStorageError(RuntimeError):
+    pass
+
+
+class PromoStorageError(RuntimeError):
     pass
 
 
@@ -191,6 +212,9 @@ def log_storage_status() -> None:
     print(f"SUPABASE_URL set: {'yes' if SUPABASE_URL else 'no'}", flush=True)
     print(f"SUPABASE_SERVICE_ROLE_KEY set: {'yes' if SUPABASE_SERVICE_ROLE_KEY else 'no'}", flush=True)
     print(f"SUPABASE_ANON_KEY fallback set: {'yes' if SUPABASE_ANON_KEY else 'no'}", flush=True)
+    if supabase_enabled():
+        print(f"Promo codes table: {SUPABASE_PROMO_CODES_TABLE}", flush=True)
+        print(f"Promo redemptions table: {SUPABASE_PROMO_REDEMPTIONS_TABLE}", flush=True)
 
 
 def supabase_request(
@@ -370,6 +394,172 @@ def valid_promo_code(code: str) -> bool:
     return 3 <= len(code) <= 32 and all(character in allowed for character in code)
 
 
+def fetch_promo_from_supabase(code: str) -> "PromoCode | None":
+    if not supabase_enabled():
+        return None
+
+    try:
+        rows = supabase_request(
+            "GET",
+            SUPABASE_PROMO_CODES_TABLE,
+            query={
+                "select": "code,amount,max_people",
+                "code": f"eq.{code}",
+                "limit": "1",
+            },
+        )
+        redemption_rows = supabase_request(
+            "GET",
+            SUPABASE_PROMO_REDEMPTIONS_TABLE,
+            query={
+                "select": "user_id",
+                "code": f"eq.{code}",
+            },
+        )
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not fetch promo code {code} from Supabase: {error}")
+        raise PromoStorageError("Promo database is temporarily unavailable. Try again in a minute.") from error
+
+    if not isinstance(rows, list):
+        raise PromoStorageError("Promo database returned an unexpected response. Try again in a minute.")
+    if not rows:
+        promo_codes.pop(code, None)
+        return None
+    if not isinstance(redemption_rows, list):
+        raise PromoStorageError("Promo redemption database returned an unexpected response. Try again in a minute.")
+
+    redeemed_by = set()
+    for row in redemption_rows:
+        try:
+            redeemed_by.add(int(row["user_id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    row = rows[0]
+    try:
+        promo = PromoCode(
+            code=str(row["code"]),
+            amount=int(row["amount"]),
+            max_people=int(row["max_people"]),
+            redeemed_by=redeemed_by,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise PromoStorageError("Promo database returned an invalid promo code. Try again in a minute.") from error
+
+    promo_codes[promo.code] = promo
+    return promo
+
+
+def promo_for(code: str) -> "PromoCode | None":
+    if supabase_enabled():
+        return fetch_promo_from_supabase(code)
+    return promo_codes.get(code)
+
+
+def delete_promo_redemptions_from_supabase(code: str | None = None) -> None:
+    if not supabase_enabled():
+        return
+
+    query = {"code": f"eq.{code}"} if code is not None else {"code": "not.is.null"}
+    try:
+        supabase_request(
+            "DELETE",
+            SUPABASE_PROMO_REDEMPTIONS_TABLE,
+            query=query,
+            prefer="return=minimal",
+        )
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not delete promo redemptions from Supabase: {error}")
+        raise PromoStorageError("Promo database is temporarily unavailable. Try again in a minute.") from error
+
+
+def delete_promo_redemption_from_supabase(code: str, user_id: int) -> None:
+    if not supabase_enabled():
+        return
+
+    try:
+        supabase_request(
+            "DELETE",
+            SUPABASE_PROMO_REDEMPTIONS_TABLE,
+            query={
+                "code": f"eq.{code}",
+                "user_id": f"eq.{user_id}",
+            },
+            prefer="return=minimal",
+        )
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not roll back promo redemption {code} for {user_id}: {error}")
+
+
+def save_promo_to_supabase(promo: "PromoCode") -> None:
+    if not supabase_enabled():
+        return
+
+    try:
+        supabase_request(
+            "POST",
+            SUPABASE_PROMO_CODES_TABLE,
+            payload={
+                "code": promo.code,
+                "amount": promo.amount,
+                "max_people": promo.max_people,
+            },
+            query={"on_conflict": "code"},
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not save promo code {promo.code} to Supabase: {error}")
+        raise PromoStorageError("Promo database is temporarily unavailable. Try again in a minute.") from error
+
+    delete_promo_redemptions_from_supabase(promo.code)
+
+
+def save_promo_redemption_to_supabase(code: str, user_id: int) -> tuple[bool, str | None]:
+    if not supabase_enabled():
+        return True, None
+
+    try:
+        supabase_request(
+            "POST",
+            SUPABASE_PROMO_REDEMPTIONS_TABLE,
+            payload={
+                "code": code,
+                "user_id": str(user_id),
+            },
+            prefer="return=minimal",
+        )
+    except HTTPError as error:
+        if error.code == 409:
+            return False, "You already redeemed that promo code."
+        print(f"Could not save promo redemption {code} for {user_id} to Supabase: {error}")
+        raise PromoStorageError("Promo database is temporarily unavailable. Try again in a minute.") from error
+    except (URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not save promo redemption {code} for {user_id} to Supabase: {error}")
+        raise PromoStorageError("Promo database is temporarily unavailable. Try again in a minute.") from error
+
+    return True, None
+
+
+def reset_promos() -> None:
+    if not supabase_enabled():
+        promo_codes.clear()
+        return
+
+    delete_promo_redemptions_from_supabase()
+    try:
+        supabase_request(
+            "DELETE",
+            SUPABASE_PROMO_CODES_TABLE,
+            query={"code": "not.is.null"},
+            prefer="return=minimal",
+        )
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        print(f"Could not delete promo codes from Supabase: {error}")
+        raise PromoStorageError("Promo database is temporarily unavailable. Try again in a minute.") from error
+
+    promo_codes.clear()
+
+
 def mines_multiplier(mine_count: int, revealed_safe: int, bet: int) -> float:
     if revealed_safe < 1:
         return 1.0
@@ -429,24 +619,60 @@ def spin_slots() -> list[str]:
     return random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
 
 
-def spin_slots_for_player(vip: bool = False) -> tuple[list[str], bool]:
+def spin_slots_for_player(vip: bool = False) -> list[str]:
     reels = spin_slots()
-    if vip and slots_multiplier(reels) == 0 and random.random() < VIP_SLOT_RESPIN_CHANCE:
-        return spin_slots(), True
-    return reels, False
+    if not vip or random.random() >= VIP_SLOT_RESPIN_CHANCE:
+        return reels
+
+    best_reels = reels
+    best_multiplier = slots_multiplier(reels)
+    for _ in range(VIP_SLOT_BONUS_SPINS):
+        candidate_reels = spin_slots()
+        candidate_multiplier = slots_multiplier(candidate_reels)
+        if candidate_multiplier > best_multiplier:
+            best_reels = candidate_reels
+            best_multiplier = candidate_multiplier
+
+    return best_reels
 
 
 def slots_multiplier(reels: list[str]) -> float:
     counts = {symbol: reels.count(symbol) for symbol in set(reels)}
     if 3 in counts.values():
         return SLOT_THREE_MATCH_MULTIPLIERS[reels[0]]
-    if 2 in counts.values():
-        return SLOT_TWO_MATCH_MULTIPLIER
+
+    for symbol, count in counts.items():
+        if count == 2:
+            return SLOT_TWO_MATCH_MULTIPLIERS[symbol]
+
+    symbols = set(reels)
+    if "7" in symbols and "BAR" in symbols:
+        return SLOT_SEVEN_BAR_MIX_MULTIPLIER
+    if "7" in symbols:
+        return SLOT_SEVEN_MIX_MULTIPLIER
+    if {"Diamond", "Bell"} <= symbols:
+        return SLOT_DIAMOND_BELL_MIX_MULTIPLIER
+    if {"Diamond", "Cherry"} <= symbols:
+        return SLOT_DIAMOND_CHERRY_MIX_MULTIPLIER
     return 0.0
 
 
 def slots_display(reels: list[str]) -> str:
     return " | ".join(SLOT_EMOJIS[symbol] for symbol in reels)
+
+
+def apply_slot_loss_streak_guarantee(user_id: int, multiplier: float) -> float:
+    if slot_loss_streaks.get(user_id, 0) < SLOT_LOSS_STREAK_TRIGGER:
+        return multiplier
+    return max(multiplier, SLOT_LOSS_STREAK_GUARANTEE_MULTIPLIER)
+
+
+def update_slot_loss_streak(user_id: int, payout: float, bet: int) -> None:
+    if payout >= bet:
+        slot_loss_streaks.pop(user_id, None)
+        return
+
+    slot_loss_streaks[user_id] = slot_loss_streaks.get(user_id, 0) + 1
 
 
 def make_embed(title: str, description: str, color: discord.Color | None = None) -> discord.Embed:
@@ -1189,6 +1415,7 @@ async def casino_help(ctx: commands.Context) -> None:
                 ".addbal @user [amount] - add balance",
                 ".removebal @user [amount] - remove balance",
                 ".promo [code] [amount] [people_limit] - create a promo code",
+                ".resetpromos - delete all promo codes and redemptions",
                 ".testhand [cards] - set active blackjack hand; example: .testhand A K",
                 ".dbstatus - check Supabase connection",
             ]
@@ -1241,6 +1468,8 @@ async def dbstatus_command(ctx: commands.Context) -> None:
         f"SUPABASE_ANON_KEY fallback set: {'yes' if SUPABASE_ANON_KEY else 'no'}",
         f"Balances table: `{SUPABASE_BALANCES_TABLE}`",
         f"Command guard table: `{SUPABASE_COMMAND_MESSAGES_TABLE}`",
+        f"Promo codes table: `{SUPABASE_PROMO_CODES_TABLE}`",
+        f"Promo redemptions table: `{SUPABASE_PROMO_REDEMPTIONS_TABLE}`",
     ]
 
     if supabase_enabled():
@@ -1271,6 +1500,34 @@ async def dbstatus_command(ctx: commands.Context) -> None:
         else:
             row_count = len(guard_rows) if isinstance(guard_rows, list) else 0
             lines.append(f"Command guard table: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
+
+        try:
+            promo_rows = supabase_request(
+                "GET",
+                SUPABASE_PROMO_CODES_TABLE,
+                query={"select": "code", "limit": "1"},
+            )
+        except HTTPError as error:
+            lines.append(f"Promo codes table: failed with {http_error_summary(error)}")
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            lines.append(f"Promo codes table: failed ({type(error).__name__})")
+        else:
+            row_count = len(promo_rows) if isinstance(promo_rows, list) else 0
+            lines.append(f"Promo codes table: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
+
+        try:
+            redemption_rows = supabase_request(
+                "GET",
+                SUPABASE_PROMO_REDEMPTIONS_TABLE,
+                query={"select": "code", "limit": "1"},
+            )
+        except HTTPError as error:
+            lines.append(f"Promo redemptions table: failed with {http_error_summary(error)}")
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            lines.append(f"Promo redemptions table: failed ({type(error).__name__})")
+        else:
+            row_count = len(redemption_rows) if isinstance(redemption_rows, list) else 0
+            lines.append(f"Promo redemptions table: connected ({row_count} sample row{'s' if row_count != 1 else ''})")
     else:
         lines.append("Supabase test: skipped because env vars are missing")
 
@@ -1384,13 +1641,26 @@ async def promo_command(ctx: commands.Context, code: str, amount: int, people_li
         await ctx.send("Promo people limit must be at least 1.")
         return
 
-    promo_codes[normalized_code] = PromoCode(code=normalized_code, amount=amount, max_people=people_limit)
+    promo = PromoCode(code=normalized_code, amount=amount, max_people=people_limit)
+    save_promo_to_supabase(promo)
+    promo_codes[normalized_code] = promo
     await ctx.send(
         embed=make_embed(
             "Promo Created",
             f"Code `{normalized_code}` gives ${money(amount)} and can be redeemed by {people_limit} unique user{'s' if people_limit != 1 else ''}.",
         )
     )
+
+
+@bot.command(name="resetpromos")
+@commands.guild_only()
+@developer_only()
+async def reset_promos_command(ctx: commands.Context) -> None:
+    if not await require_developer_role(ctx):
+        return
+
+    reset_promos()
+    await ctx.send(embed=make_embed("Promos Reset", "All promo codes and redemptions have been deleted."))
 
 
 @bot.command(name="redeem")
@@ -1401,7 +1671,7 @@ async def redeem_command(ctx: commands.Context, code: str) -> None:
         return
 
     normalized_code = normalize_promo_code(code)
-    promo = promo_codes.get(normalized_code)
+    promo = promo_for(normalized_code)
     if promo is None:
         await ctx.send("That promo code does not exist.")
         return
@@ -1411,9 +1681,20 @@ async def redeem_command(ctx: commands.Context, code: str) -> None:
         await ctx.send(reason)
         return
 
+    redemption_saved, redemption_reason = save_promo_redemption_to_supabase(promo.code, ctx.author.id)
+    if not redemption_saved:
+        await ctx.send(redemption_reason)
+        return
+
     promo.redeemed_by.add(ctx.author.id)
     balance = balance_for(ctx.author.id) + promo.amount
-    set_balance(ctx.author.id, balance)
+    try:
+        set_balance(ctx.author.id, balance)
+    except BalanceStorageError:
+        promo.redeemed_by.discard(ctx.author.id)
+        delete_promo_redemption_from_supabase(promo.code, ctx.author.id)
+        raise
+
     await ctx.send(
         embed=make_embed(
             "Promo Redeemed",
@@ -1547,18 +1828,27 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
         return
 
     is_vip = has_vip_role(ctx.author)
-    reels, vip_respin = spin_slots_for_player(is_vip)
+    reels = spin_slots_for_player(is_vip)
     base_multiplier = slots_multiplier(reels)
     multiplier = round(base_multiplier * bet_return_rate(bet) * SLOT_RETURN_MULTIPLIER, 4)
+    multiplier = apply_slot_loss_streak_guarantee(ctx.author.id, multiplier)
     payout = round(bet * multiplier, 2)
 
     balance = round(balance - bet + payout, 2)
     set_balance(ctx.author.id, balance)
+    update_slot_loss_streak(ctx.author.id, payout, bet)
 
-    if payout > 0:
+    if payout > bet:
         profit = round(payout - bet, 2)
         outcome = f"You win ${money(payout)}. Profit: ${money(profit)}."
         color = discord.Color.green()
+    elif payout == bet:
+        outcome = f"You break even with ${money(payout)} back."
+        color = discord.Color.blurple()
+    elif payout > 0:
+        profit = round(bet - payout, 2)
+        outcome = f"Partial hit: ${money(payout)} back. Profit: -${money(profit)}."
+        color = discord.Color.red()
     else:
         outcome = f"No match. You lose ${money(bet)}."
         color = discord.Color.red()
@@ -1566,7 +1856,6 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
     lines = [
         warning,
         f"[ {slots_display(reels)} ]",
-        "VIP respin used." if vip_respin else None,
         f"Multiplier: {money(multiplier)}x",
         outcome,
         f"New balance: ${money(balance)}.",
@@ -1676,6 +1965,7 @@ def command_usage(command_name: str | None) -> str | None:
         "addbal": ".addbal @user amount",
         "removebal": ".removebal @user amount",
         "promo": ".promo code amount [people_limit]",
+        "resetpromos": ".resetpromos",
         "redeem": ".redeem code",
         "mines": ".mines bet mines",
         "cf": ".cf bet heads",
@@ -1694,6 +1984,10 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
     if isinstance(error, BalanceStorageError):
         await ctx.send(str(error))
     elif isinstance(original_error, BalanceStorageError):
+        await ctx.send(str(original_error))
+    elif isinstance(error, PromoStorageError):
+        await ctx.send(str(error))
+    elif isinstance(original_error, PromoStorageError):
         await ctx.send(str(original_error))
     elif isinstance(error, commands.MissingRequiredArgument):
         usage = command_usage(ctx.command.name if ctx.command else None)
