@@ -86,8 +86,8 @@ VIP_DICE_WIN_CHANCE_BONUS = 5.0
 VIP_BLACKJACK_SAFE_DRAW_CHANCE = 0.0
 VIP_MINES_SAVE_CHANCE = 0.0
 HIGH_BET_THRESHOLD = 1000
-LOW_BET_RETURN = 0.925
-HIGH_BET_RETURN = 0.85
+LOW_BET_RETURN = 0.90
+HIGH_BET_RETURN = 0.80
 MINES_GRID_SIZE = 25
 SLOT_SYMBOLS = ["7", "BAR", "Bell", "Cherry", "Lemon", "Diamond"]
 SLOT_WEIGHTS = [1, 2, 4, 6, 8, 10]
@@ -100,30 +100,46 @@ SLOT_EMOJIS = {
     "Diamond": "💎",
 }
 REGULAR_SLOT_MULTIPLIER_WEIGHTS = [
-    (0.00, 5),
-    (0.05, 8),
-    (0.12, 8),
-    (0.25, 8),
-    (0.50, 8),
-    (0.75, 8),
-    (0.90, 8),
-    (0.98, 8),
-    (1.00, 20),
-    (1.10, 12),
-    (1.19, 6),
+    (0.00, 7),
+    (0.05, 6),
+    (0.12, 5),
+    (0.25, 5),
+    (0.50, 5),
+    (0.75, 4),
+    (0.90, 3),
+    (0.98, 2),
+    (1.00, 28),
+    (1.10, 19),
+    (1.19, 12),
     (2.00, 1),
+    (3.00, 1),
+    (4.00, 2),
+]
+HIGH_BET_REGULAR_SLOT_MULTIPLIER_WEIGHTS = [
+    (0.00, 13),
+    (0.05, 8),
+    (0.12, 6),
+    (0.25, 5),
+    (0.50, 4),
+    (0.75, 3),
+    (0.90, 2),
+    (0.98, 1),
+    (1.00, 28),
+    (1.10, 18),
+    (1.19, 10),
+    (4.00, 2),
 ]
 VIP_SLOT_MULTIPLIER_WEIGHTS = [
-    (0.00, 5),
-    (0.10, 7),
-    (0.25, 7),
-    (0.50, 7),
-    (0.85, 7),
-    (0.98, 7),
-    (1.00, 17),
-    (1.10, 17),
-    (1.19, 15),
-    (2.00, 8),
+    (0.00, 6),
+    (0.10, 5),
+    (0.25, 5),
+    (0.50, 4),
+    (0.85, 3),
+    (0.98, 2),
+    (1.00, 28),
+    (1.10, 23),
+    (1.19, 17),
+    (2.00, 4),
     (5.00, 2),
     (10.00, 1),
 ]
@@ -637,8 +653,14 @@ def spin_slots() -> list[str]:
     return random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
 
 
-def weighted_slot_multiplier(vip: bool = False) -> float:
-    multiplier_weights = VIP_SLOT_MULTIPLIER_WEIGHTS if vip else REGULAR_SLOT_MULTIPLIER_WEIGHTS
+def weighted_slot_multiplier(bet: int, vip: bool = False) -> float:
+    if vip:
+        multiplier_weights = VIP_SLOT_MULTIPLIER_WEIGHTS
+    elif bet > HIGH_BET_THRESHOLD:
+        multiplier_weights = HIGH_BET_REGULAR_SLOT_MULTIPLIER_WEIGHTS
+    else:
+        multiplier_weights = REGULAR_SLOT_MULTIPLIER_WEIGHTS
+
     multipliers = [multiplier for multiplier, _ in multiplier_weights]
     weights = [weight for _, weight in multiplier_weights]
     return random.choices(multipliers, weights=weights, k=1)[0]
@@ -944,7 +966,13 @@ class BlackjackGame:
 
 def blackjack_embed(game: BlackjackGame, notice: str | None = None) -> discord.Embed:
     description = notice or game.result or "Choose an action."
-    color = discord.Color.green() if game.finished and "win" in description.lower() else discord.Color.blurple()
+    lower_description = description.lower()
+    if game.finished and "win" in lower_description:
+        color = discord.Color.green()
+    elif game.finished and any(word in lower_description for word in ("lose", "lost", "bust", "timed out")):
+        color = discord.Color.red()
+    else:
+        color = discord.Color.blurple()
     embed = make_embed("Blackjack", description, color)
 
     if game.finished:
@@ -1811,7 +1839,7 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
 
     is_vip = has_vip_role(ctx.author)
     reels = spin_slots()
-    multiplier = weighted_slot_multiplier(is_vip)
+    multiplier = weighted_slot_multiplier(bet, is_vip)
     multiplier = apply_slot_loss_streak_guarantee(ctx.author.id, multiplier)
     payout = round(bet * multiplier, 2)
 
