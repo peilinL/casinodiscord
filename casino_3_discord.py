@@ -1598,8 +1598,7 @@ async def mines_command(ctx: commands.Context, requested_bet: int, mine_count: i
 
     session = MinesSession(game)
     active_mines_sessions[ctx.author.id] = session
-    vip_notice = " VIP luck active." if is_vip else ""
-    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}.{vip_notice}"
+    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}."
     session.board_message = await ctx.send(embed=mines_embed(game, notice), view=session.board_view)
     session.control_message = await ctx.send(embed=mines_control_embed(game), view=session.control_view)
 
@@ -1663,8 +1662,7 @@ async def blackjack_command(ctx: commands.Context, requested_bet: int) -> None:
 
     view = BlackjackView(game)
     active_blackjack_views[ctx.author.id] = view
-    vip_notice = " VIP luck active." if is_vip else ""
-    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}.{vip_notice}"
+    notice = f"{warning + ' ' if warning else ''}Game started, bet is ${money(bet)}."
     view.message = await ctx.send(embed=blackjack_embed(game, notice), view=view)
 
 
