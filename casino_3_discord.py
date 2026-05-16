@@ -1362,11 +1362,6 @@ async def on_message(message: discord.Message) -> None:
     if message.author.bot or not message.content.startswith(COMMAND_PREFIX):
         return
 
-    command_name = message.content[len(COMMAND_PREFIX):].split(maxsplit=1)[0].lower()
-    if command_name == "dbstatus":
-        await bot.process_commands(message)
-        return
-
     if not claim_command_message(message.id):
         print(f"Skipped duplicate command message {message.id}", flush=True)
         return
