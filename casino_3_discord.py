@@ -1848,18 +1848,16 @@ async def slots_command(ctx: commands.Context, requested_bet: int) -> None:
     update_slot_loss_streak(ctx.author.id, payout, bet)
 
     if payout > bet:
-        profit = round(payout - bet, 2)
-        outcome = f"You win ${money(payout)}. Profit: ${money(profit)}."
+        outcome = f"Payout: ${money(payout)}."
         color = discord.Color.green()
     elif payout == bet:
-        outcome = f"You break even with ${money(payout)} back."
-        color = discord.Color.blurple()
+        outcome = f"Payout: ${money(payout)}."
+        color = discord.Color.green()
     elif payout > 0:
-        profit = round(bet - payout, 2)
-        outcome = f"Partial hit: ${money(payout)} back. Profit: -${money(profit)}."
+        outcome = f"Payout: ${money(payout)}."
         color = discord.Color.red()
     else:
-        outcome = f"No match. You lose ${money(bet)}."
+        outcome = f"Payout: ${money(payout)}."
         color = discord.Color.red()
 
     lines = [
