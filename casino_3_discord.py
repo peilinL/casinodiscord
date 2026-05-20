@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import random
+import sys
+import traceback
 import threading
 from math import comb
 from dataclasses import dataclass, field
@@ -2020,6 +2022,14 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
 
 def main() -> None:
     token = os.getenv("DISCORD_TOKEN")
+    print(
+        "Startup env: "
+        f"DISCORD_TOKEN set={'yes' if token else 'no'}, "
+        f"PORT set={'yes' if os.getenv('PORT') else 'no'}, "
+        f"SUPABASE_URL set={'yes' if SUPABASE_URL else 'no'}, "
+        f"SUPABASE_SERVICE_ROLE_KEY set={'yes' if SUPABASE_SERVICE_ROLE_KEY else 'no'}",
+        flush=True,
+    )
     if not token:
         raise RuntimeError("Set the DISCORD_TOKEN environment variable before running the bot.")
     start_render_health_server()
@@ -2028,4 +2038,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        print("Startup failed with an exception:", flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)

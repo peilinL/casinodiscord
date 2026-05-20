@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python casino_3_discord.py
+    startCommand: python -u casino_3_discord.py
     healthCheckPath: /
     envVars:
       - key: DISCORD_TOKEN
